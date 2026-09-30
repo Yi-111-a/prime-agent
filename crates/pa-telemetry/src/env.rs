@@ -1,15 +1,7 @@
-//! Environment-variable override resolution for the opt-in posture.
-//!
-//! Parity with the TS product's `isTelemetryEnabled` env handling:
-//! - `PI_OFFLINE` truthy disables (falsy is ignored).
-//! - `DO_NOT_TRACK` truthy disables (falsy is ignored).
-//! - `PRIME_AGENT_TELEMETRY` truthy/falsy overrides in both directions.
-//!
-//! [`env_telemetry_override`] returns the env verdict; settings (owned by
-//! pa-core) apply when the verdict is absent.
-
-/// Parse a truthy/falsy string per the TS product: `1/true/yes/on` and
-/// `0/false/no/off` (case-insensitive, trimmed); anything else is not an
+//! Environment-variable override resolution for the opt-in posture (`isTelemetryEnabled` env
+//! handling): `PI_OFFLINE` and `DO_NOT_TRACK` truthy disable; `PRIME_AGENT_TELEMETRY` overrides in
+//! both directions; settings apply when the verdict is absent.
+/// Parse a truthy/falsy string per the TS product; anything else is not an
 /// override.
 #[must_use]
 pub fn parse_bool_override(value: Option<&str>) -> Option<bool> {
@@ -65,7 +57,6 @@ mod tests {
     fn verdict_disables_only() {
         assert_eq!(override_verdict(Some(true), None, Some(true)), Some(false));
         assert_eq!(override_verdict(None, Some(true), Some(true)), Some(false));
-        // Falsy PI_OFFLINE / DO_NOT_TRACK do not enable.
         assert_eq!(override_verdict(Some(false), Some(false), None), None);
     }
 

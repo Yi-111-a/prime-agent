@@ -6,8 +6,7 @@ use serde_json::{json, Value};
 use crate::properties::Properties;
 use crate::time::EpochMs;
 
-/// A single telemetry event. Carries a stable event name and a
-/// primitive-only property map. Timestamps are captured at `track()` time.
+/// A single telemetry event.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TelemetryEvent {
     /// Stable event name, e.g. `agent started`.
@@ -41,8 +40,8 @@ impl TelemetryEvent {
     }
 
     /// The sink-facing object form: `{"name", "timestamp" (ISO-8601),
-    /// "properties"}`. Sinks lift fields from this shape into their wire
-    /// format (`PostHog` `event`/`timestamp`, JSONL mirror adds `distinct_id`).
+    /// "properties"}`; sinks lift fields into their wire format (the JSONL
+    /// mirror adds `distinct_id`).
     pub(crate) fn to_value(&self) -> Value {
         json!({
             "name": self.name,

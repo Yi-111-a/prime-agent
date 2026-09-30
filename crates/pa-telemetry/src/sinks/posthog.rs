@@ -1,11 +1,7 @@
-//! `PostHog` batched capture sink (primary product sink).
-//!
-//! Wire format is the `PostHog` capture v2 batch API: `POST {base}/batch/` with
-//! `{"api_key", "batch": [{event, distinct_id, timestamp, properties}]}`.
-//! Endpoint and project key come from configuration (env override, then
-//! settings, resolved by the composition root); pa-telemetry ships no
-//! compiled-in endpoint or key, so the stack is self-hostable and an empty
-//! configuration resolves to `NoopSink` instead.
+//! The `PostHog` batched capture sink (primary product sink): wire format is
+//! the capture v2 batch API, `POST {base}/batch/` with `{"api_key", "batch":
+//! [{event, distinct_id, timestamp, properties}]}`. No compiled-in endpoint
+//! or key: an empty configuration resolves to `NoopSink`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -18,7 +14,7 @@ use serde_json::json;
 use crate::event::TelemetryEvent;
 use crate::sink::{SinkOutcome, TelemetrySink};
 
-/// TS parity: requests time out after 1.5s so telemetry never holds the agent.
+/// Requests time out after 1.5s so telemetry never holds the agent.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// A resolved `PostHog` endpoint: base URL + project capture key.
@@ -67,12 +63,10 @@ fn trimmed_non_empty(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// The primary sink: batches to `PostHog`. Best-effort — any non-2xx response,
-/// transport error, or timeout drops the batch (offline-safe, no retries).
-/// A 401 is terminal instead of per-batch: bad or missing-scope credentials
-/// cannot succeed on a later batch, so the sink stops requesting until the
-/// process restarts (a 401 every flush is a retry loop the endpoint can
-/// never clear).
+/// The primary sink: batches to `PostHog`, best-effort - any non-2xx
+/// response, transport error, or timeout drops the batch (no retries). A 401
+/// is terminal instead of per-batch: bad or missing-scope credentials cannot
+/// succeed later, so the sink stops requesting until the process restarts.
 #[derive(Clone)]
 pub struct PostHogSink {
     http: reqwest::Client,
@@ -82,7 +76,7 @@ pub struct PostHogSink {
 }
 
 impl PostHogSink {
-    /// Sink with the TS-parity 1.5s request timeout.
+    /// Sink with the 1.5s request timeout.
     #[must_use]
     pub fn new(endpoint: &PostHogEndpoint) -> Self {
         Self::with_timeout(endpoint, DEFAULT_REQUEST_TIMEOUT)
@@ -156,8 +150,8 @@ impl TelemetrySink for PostHogSink {
             match response {
                 Ok(response) if response.status().is_success() => SinkOutcome::Sent,
                 Ok(response) if response.status().as_u16() == 401 => {
-                    // Terminal, not retried: the key is bad or missing a
-                    // scope, so no later batch can succeed either.
+                    // Terminal: a bad or missing-scope key cannot succeed
+                    // on a later batch either.
                     self.auth_terminal.store(true, Ordering::Relaxed);
                     tracing::debug!(
                         count = events.len(),
@@ -213,7 +207,6 @@ mod tests {
 
     #[test]
     fn endpoint_env_resolution_requires_both() {
-        // No env: absent.
         std::env::remove_var("PRIME_AGENT_TELEMETRY_ENDPOINT");
         std::env::remove_var("PRIME_AGENT_TELEMETRY_API_KEY");
         assert_eq!(PostHogEndpoint::from_env(), None);

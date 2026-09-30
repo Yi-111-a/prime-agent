@@ -1,20 +1,13 @@
-//! Typed builders for the catalog's v2 events: the compile-time surface of
-//! the #2117 tracking vocabulary. Every field is typed (numbers are `u64`,
-//! enums are Rust enums, nullable durations are `Option<u64>`), so a firing
-//! site cannot emit a stringly-typed or out-of-vocabulary value. Optional
-//! fields are `Option` and simply omit the property when `None`.
-//!
-//! The builders only carry event-specific properties; the client merges the
-//! base properties (version, platform, execution mode) under them, and the
-//! worker normalizes every batch through [`crate::catalog::sanitize`]
-//! before any sink sees it.
+//! Typed builders for the catalog's v2 events: every field is typed, so a
+//! firing site cannot emit a stringly-typed or out-of-vocabulary value;
+//! optional fields omit the property when `None`.
 
 use serde_json::Value;
 
 use crate::properties::Properties;
 use crate::TelemetryClient;
 
-/// The #2117 run trigger: a fresh prompt or a loop continuation.
+/// A fresh prompt or a loop continuation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunTrigger {
     Prompt,
@@ -34,8 +27,8 @@ impl RunTrigger {
     }
 }
 
-/// The #2117 tool category (the fixed vocabulary; `from_tool_name` maps a
-/// concrete tool name onto it, `unknown` for anything unrecognized).
+/// The fixed tool-category vocabulary: `from_tool_name` maps a concrete tool
+/// name onto it, `unknown` for anything unrecognized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolCategory {
     Read,
@@ -89,7 +82,7 @@ impl ToolCategory {
     }
 }
 
-/// The #2117 timing stage: which boundary a timing event measures.
+/// Which boundary a timing event measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimingStage {
     FirstModelEvent,
@@ -117,8 +110,8 @@ impl TimingStage {
     }
 }
 
-/// The #2117 error event kind: a failure occurrence or a later recovery
-/// update (recovery never creates a second occurrence).
+/// A failure occurrence or a later recovery update (recovery never creates a
+/// second occurrence).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorEventKind {
     Occurrence,
@@ -221,9 +214,8 @@ impl AgentToolSummary {
     }
 }
 
-/// `agent error`: an error occurrence or recovery update. The message
-/// policy keeps raw provider text out: `diagnostic_message` carries the
-/// fixed diagnostic, and `error_message` only a reviewed fixed string.
+/// An error occurrence or recovery update: `diagnostic_message` carries the
+/// fixed diagnostic; `error_message` only a reviewed fixed string.
 #[derive(Debug, Clone, Default)]
 pub struct AgentError {
     pub error_id: String,
@@ -666,7 +658,6 @@ mod tests {
 
     #[test]
     fn vocabulary_consts_stay_in_the_catalog() {
-        // The builder enums must stay inside the catalog vocabularies.
         for trigger in ["prompt", "continuation", "unknown"] {
             assert!(RUN_TRIGGERS.contains(&trigger));
         }

@@ -1,8 +1,7 @@
-//! Base properties for every telemetry event: product version, platform,
-//! install method, execution mode, and the platform-fidelity set.
+//! Base properties for every telemetry event, plus the platform-fidelity set.
 //!
-//! Fidelity probes are cheap (bounded reads, no subprocesses) and memoised per
-//! process; any failure degrades to `"unknown"`. Values are never faked.
+//! Fidelity probes are cheap bounded reads, memoised per process; failures
+//! degrade to `"unknown"` and values are never faked.
 
 use std::sync::OnceLock;
 
@@ -41,9 +40,6 @@ pub fn base_properties(execution_mode: &str) -> Properties {
     let mut properties = Properties::new();
     properties.set("version", Value::String(crate::VERSION.to_string()));
     properties.set("schema_version", Value::from(SCHEMA_VERSION));
-    // #2117/v2 common properties: the build channel, the workload origin
-    // (env override first, then the execution mode), and the catalog's
-    // property-rule revision.
     properties.set("build_channel", Value::from(build_channel()));
     properties.set(
         "workload_origin",
@@ -65,8 +61,6 @@ pub fn base_properties(execution_mode: &str) -> Properties {
     properties
 }
 
-/// The build channel: debug builds are `development`, versions carrying a
-/// `beta` prerelease are `prerelease`, everything else `release`.
 fn build_channel() -> &'static str {
     if cfg!(debug_assertions) {
         return "development";
@@ -77,10 +71,9 @@ fn build_channel() -> &'static str {
     "release"
 }
 
-/// The workload origin: `PRIME_AGENT_TELEMETRY_ORIGIN=internal|test` wins;
-/// otherwise the interactive execution mode is `interactive` and every
-/// headless mode is `automated` (the mode alone never identifies internal
-/// populations).
+/// `PRIME_AGENT_TELEMETRY_ORIGIN=internal|test` wins; otherwise interactive
+/// is `interactive` and headless is `automated` (the mode alone never
+/// identifies internal populations).
 fn workload_origin(execution_mode: &str) -> &'static str {
     match std::env::var("PRIME_AGENT_TELEMETRY_ORIGIN")
         .ok()
@@ -127,16 +120,14 @@ fn detect_libc() -> &'static str {
     }
 }
 
-/// The linked glibc version when `getconf GNU_LIBC_VERSION` output is embedded
-/// at build time; the Rust standard library exposes no portable runtime probe,
-/// so this stays `unknown` unless ldd-style inspection succeeded. Cheapest true
-/// answer: `ldd --version` needs a subprocess, which is out of budget here.
+/// Stays `unknown`: the standard library exposes no portable glibc runtime
+/// probe, and the cheap true answer (`ldd --version`) needs a subprocess.
 fn detect_libc_version() -> String {
     UNKNOWN.to_string()
 }
 
-/// AVX2 availability on `x86_64` via /proc/cpuinfo (Linux); not applicable off
-/// `x86_64`; `unknown` where there is no probe.
+/// AVX2 availability via /proc/cpuinfo on `x86_64` Linux; `not_applicable`
+/// off `x86_64`, `unknown` without a probe.
 fn detect_cpu_baseline() -> &'static str {
     if cfg!(target_arch = "x86_64") {
         if cfg!(target_os = "linux") {
@@ -216,7 +207,6 @@ mod tests {
     #[test]
     fn base_properties_carry_schema_and_platform() {
         let properties = base_properties("interactive");
-        // The #2117 vocabulary bumped the catalog to schema version 2.
         assert_eq!(
             properties.get("schema_version"),
             Some(&Value::from(SCHEMA_VERSION))
@@ -258,7 +248,6 @@ mod tests {
             properties.get("architecture"),
             Some(&Value::from(std::env::consts::ARCH))
         );
-        // Fidelity fields are always present and never empty.
         for key in [
             "libc",
             "libc_version",
@@ -269,7 +258,6 @@ mod tests {
             let value = properties.get(key).and_then(Value::as_str).expect(key);
             assert!(!value.is_empty(), "{key} must not be empty");
         }
-        // Every base value is a primitive.
         for (key, value) in properties.iter() {
             assert!(
                 matches!(

@@ -1,12 +1,5 @@
-//! Pseudonymous installation identity.
-//!
-//! Parity with the TS product's `getOrCreateTelemetryInstallationId`: a
-//! `<agentDir>/telemetry.json` state file `{ "version": 1, "installationId":
-//! <uuid> }`, created exclusively and mode 0600 on first use, validated on
-//! load, atomically replaced when the stored state is invalid. The exclusive
-//! create publishes a fully-written candidate (unique temp file + hard
-//! link), so concurrent creators converge on one id and never observe a
-//! half-written winner.
+//! Pseudonymous installation identity (TS parity:
+//! `getOrCreateTelemetryInstallationId`, `<agentDir>/telemetry.json`).
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -26,16 +19,11 @@ struct State {
 }
 
 /// Load the installation id from `<agentDir>/telemetry.json`, creating it on
-/// first use. Concurrent callers on the same directory converge on one id:
-/// the create is exclusive, the winner's state is published fully written,
-/// and losers re-read the winner's state.
+/// first use; concurrent callers converge on one id.
 ///
 /// # Errors
 ///
-/// Returns an error when a filesystem step fails: creating `agent_dir`,
-/// reading an existing state file (a missing file is not an error),
-/// publishing the candidate state (exclusive create, write, sync, hard
-/// link), or atomically replacing invalid state (temp file + rename).
+/// Returns an error when a filesystem step fails (a missing state file is not an error).
 pub fn install_id(agent_dir: &Path) -> Result<String> {
     let path = agent_dir.join(STATE_FILE);
     if let Some(existing) = read_install_id(&path)? {
@@ -53,25 +41,20 @@ pub fn install_id(agent_dir: &Path) -> Result<String> {
     let payload = serde_json::to_vec_pretty(&state)?;
 
     match publish_exclusive(&path, &payload)? {
-        // Return the id the state file stores now: on the hard-link path the
-        // durable file is this caller's own payload, and on the no-hard-link
-        // fallback a concurrent repairer may have replaced a partial state
-        // while the fallback writer was writing, so every caller converges
-        // on the durable id.
+        // Return the id the state file stores now: on the no-hard-link
+        // fallback a concurrent repairer may have replaced a partial state,
+        // so every caller converges on the durable id.
         Publish::Won => Ok(read_install_id(&path)?.unwrap_or(installation_id)),
         Publish::Lost => {
-            // Lost a create race: prefer the winner's id if it is valid,
-            // otherwise replace the invalid state atomically. The winner's
-            // publish is atomic, so this re-read can only miss on state that
-            // was already invalid before the race, never on a winner whose
-            // write is still in flight.
+            // Lost a create race: prefer the winner's id; the winner's
+            // publish is atomic, so a miss here means the state was already
+            // invalid before the race.
             if let Some(existing) = read_install_id(&path)? {
                 Ok(existing)
             } else {
                 replace_invalid_state(&path, &payload)?;
-                // Return the id the state file stores now: a concurrent
-                // repair may have landed its rename after ours, and every
-                // caller must converge on the durable id.
+                // A concurrent repair may have landed its rename after ours;
+                // converge on the durable id.
                 Ok(read_install_id(&path)?.unwrap_or(installation_id))
             }
         }
@@ -94,19 +77,13 @@ fn read_install_id(path: &Path) -> Result<Option<String>> {
 
 /// Outcome of trying to publish a candidate state file exclusively.
 enum Publish {
-    /// The candidate is live at the target path.
     Won,
-    /// Another file already owns the path.
     Lost,
 }
 
-/// Publish the candidate state exclusively so exactly one concurrent caller
-/// wins and its state appears at `path` fully written. The candidate is
-/// written to a unique sibling temp file and hard-linked into place: `link`
-/// is an atomic exclusive create, so a loser can never observe the winner's
-/// file mid-write. Filesystems without hard links fall back to the
-/// open+write+sync exclusive create, where losers re-read after
-/// `AlreadyExists`.
+/// Publish the candidate state exclusively via a unique temp file + hard
+/// link, so a loser never observes the winner's file mid-write. Filesystems
+/// without hard links fall back to the open+write+sync exclusive create.
 fn publish_exclusive(path: &Path, payload: &[u8]) -> Result<Publish> {
     let tmp = unique_sibling(path);
     let linked = create_exclusive(&tmp, payload).and_then(|()| std::fs::hard_link(&tmp, path));
@@ -130,12 +107,9 @@ fn publish_exclusive(path: &Path, payload: &[u8]) -> Result<Publish> {
     }
 }
 
-/// Atomically replace invalid state (unique temp file + rename, both sides of
-/// the rename land on the same filesystem inside the agent dir, and a unique
-/// temp name keeps concurrent replacers from sharing one temp file). The
-/// rename goes through `rename_onto` so the win32 destination-busy retry
-/// applies, like the TS `writeTelemetryStateAtomically`
-/// (`writeFileAtomicSync`).
+/// Atomically replace invalid state (unique temp file + rename through
+/// `rename_onto`, so the win32 destination-busy retry applies like TS
+/// `writeTelemetryStateAtomically`).
 fn replace_invalid_state(path: &Path, payload: &[u8]) -> Result<()> {
     let tmp = unique_sibling(path);
     if let Err(err) = create_exclusive(&tmp, payload) {
@@ -150,9 +124,9 @@ fn replace_invalid_state(path: &Path, payload: &[u8]) -> Result<()> {
     renamed
 }
 
-/// Unique sibling of `path` for atomic publishes: inside the same directory
-/// (so the hard link and the rename stay on one filesystem) and unique per
-/// call, so concurrent creators and replacers never share a temp file.
+/// Unique sibling of `path`: same directory (the hard link and rename stay
+/// on one filesystem), unique per call, so concurrent replacers never share
+/// a temp file.
 fn unique_sibling(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
@@ -293,9 +267,6 @@ mod tests {
         assert!(ids.iter().all(|id| id == &ids[0]));
     }
 
-    /// Concurrent creators must converge on one durable id: this loop aligns
-    /// more callers than there are cores on a fresh directory over and over,
-    /// and asserts every caller returns the same id the state file stores.
     #[test]
     fn concurrent_create_stress_converges() {
         const ROUNDS: usize = 64;

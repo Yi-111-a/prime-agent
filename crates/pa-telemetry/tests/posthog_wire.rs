@@ -155,7 +155,6 @@ async fn non_success_status_drops_the_batch() {
 
 #[tokio::test]
 async fn a_401_is_terminal_for_the_batch_sink() {
-    // The stub answers 401 once; the sink must never request again.
     let (base, rx) = spawn_stub(vec![(
         401,
         serde_json::json!({ "error": "Missing scope required: ingestion" }),
@@ -168,8 +167,7 @@ async fn a_401_is_terminal_for_the_batch_sink() {
         SinkOutcome::Dropped
     );
     let _ = rx.recv().expect("stub captured the rejected request");
-    // The clone shares the terminal latch: later batches drop without
-    // a request (no 401-per-flush retry loop for bad credentials).
+    // The clone shares the terminal latch: later batches drop without a request.
     let shared = sink.clone();
     assert_eq!(
         shared
@@ -209,8 +207,6 @@ async fn flags_client_decides_with_distinct_id() {
 
 #[tokio::test]
 async fn a_401_is_terminal_for_the_flags_client() {
-    // The decide endpoint answers 401 (missing scope): the client stops
-    // polling instead of re-asking every TTL.
     let (base, rx) = spawn_stub(vec![(
         401,
         serde_json::json!({ "error": "Missing scope required: decide" }),
@@ -219,7 +215,6 @@ async fn a_401_is_terminal_for_the_flags_client() {
     let flags = FlagsClient::new(&endpoint, "install-1");
     assert!(!flags.flag_enabled("new_engine", false).await);
     let _ = rx.recv().expect("stub captured the rejected decide");
-    // The later lookups serve the configured default without a request.
     assert!(!flags.flag_enabled("legacy_mode", false).await);
     assert!(flags.flag_enabled("other", true).await);
     assert!(rx.try_recv().is_err(), "no second decide hit the stub");

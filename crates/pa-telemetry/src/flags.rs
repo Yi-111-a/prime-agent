@@ -1,11 +1,7 @@
 //! `PostHog` feature-flag client (gradual rollouts).
 //!
-//! v1 scope: fetch + [`FlagsClient::flag_enabled`] with an in-memory TTL
-//! cache; no product gating lives in this crate. Decisions are anonymous —
-//! the only identity is the pseudonymous installation id (`distinct_id`).
-//! When `PostHog` is unreachable the configured default is served and the
-//! (empty) result is cached for the TTL so an offline client never
-//! request-storms.
+//! No product gating lives in this crate; decisions are anonymous (the only
+//! identity is the pseudonymous installation id, `distinct_id`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,9 +21,8 @@ pub struct FlagsClient {
     api_key: String,
     distinct_id: String,
     cache: std::sync::Mutex<Option<CacheEntry>>,
-    /// Latched when the decide endpoint answers 401 (bad or missing-scope
-    /// credentials): no further decide is attempted, so a permanently
-    /// rejected key cannot poll the endpoint every TTL.
+    /// Latched on a decide 401 (bad or missing-scope credentials): no
+    /// further decide, so a rejected key cannot poll every TTL.
     auth_terminal: AtomicBool,
 }
 
@@ -42,8 +37,7 @@ impl FlagsClient {
     ///
     /// # Panics
     ///
-    /// Panics if the internal reqwest HTTP client (rustls backend) cannot
-    /// be built.
+    /// Panics if the internal reqwest HTTP client (rustls backend) cannot be built.
     pub fn new(endpoint: &crate::sinks::PostHogEndpoint, distinct_id: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_millis(1500))
@@ -60,11 +54,9 @@ impl FlagsClient {
         }
     }
 
-    /// Is the flag enabled for this installation? A fresh decide cache is
-    /// authoritative for every flag name (absent = default, no refetch);
-    /// a stale or missing cache refetches. Offline, `default` is served and
-    /// the (empty) result is cached for the TTL so a dead endpoint is polled
-    /// at most once per TTL per client.
+    /// Is the flag enabled for this installation? A fresh cache is authoritative (absent = default,
+    /// no refetch); a stale or missing cache refetches. Offline, `default` is served and the empty
+    /// result cached for the TTL, so a dead endpoint is polled at most once per TTL per client.
     pub async fn flag_enabled(&self, name: &str, default: bool) -> bool {
         if self.auth_terminal.load(Ordering::Relaxed) {
             return default;
@@ -122,8 +114,7 @@ impl FlagsClient {
             .await
             .ok()?;
         if response.status().as_u16() == 401 {
-            // Terminal, not retried: bad or missing-scope credentials fail
-            // every decide; stop polling instead of re-asking each TTL.
+            // Terminal: bad credentials fail every decide; stop re-asking each TTL.
             self.auth_terminal.store(true, Ordering::Relaxed);
             tracing::debug!("feature-flag decide rejected with 401, polling disabled");
             return None;
@@ -206,7 +197,6 @@ mod tests {
             "install-1",
         );
         *client.cache.lock().unwrap() = Some(entry(HashMap::new(), Instant::now()));
-        // Fresh cache that does not know the flag: no refetch signal.
         assert_eq!(client.cached_flag("absent"), Some(None));
     }
 }
