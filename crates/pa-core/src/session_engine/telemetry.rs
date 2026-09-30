@@ -1,25 +1,8 @@
 //! Session telemetry: the agent-event state machine behind the session
-//! lifecycle events (`agent started` / `agent run started` /
-//! `agent run completed` / `agent session ended` / `agent command used` /
-//! `tool executed`) and the #2117 v2 vocabulary (`agent error`,
-//! `agent timing`, `agent tool summary`). Behavioral port of the TS
-//! `installAgentTelemetry` subscriber (`packages/coding-agent/src/core/
-//! telemetry.ts`) plus the never-merged #2117 tracking intent, implemented
-//! on the pa-telemetry catalog's typed builders.
-//!
-//! Divergence from the TS state machine, documented: the TS subscriber tracks
-//! `turnActionActive` because the TS session loop can span several agent runs
-//! inside one queued turn action. The Rust loop pairs every `AgentStart` with
-//! exactly one `AgentEnd` per admitted run, so one run == one
-//! `AgentStart..AgentEnd` window and no turn-action tracking is needed.
-//! A retried turn re-enters the loop, so each retry attempt is its own
-//! window: the failed window reports the error occurrence, the retry
-//! window reports the recovery.
-//!
-//! Privacy contract: this module emits counter/duration/category facts only —
-//! never prompt text, model output, tool arguments or results. Failed
-//! model calls classify through [`super::error_classify`]: only fixed
-//! diagnostics and reviewed fixed strings ride events.
+//! lifecycle events. Divergence: no turn-action tracking — every `AgentStart`
+//! pairs with exactly one `AgentEnd` per admitted run. Privacy contract:
+//! counter/duration/category facts only — never prompt text, model output,
+//! tool arguments or results.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -35,12 +18,6 @@ use serde_json::Value;
 use super::auto_retry::AutoRetryEvent;
 use super::error_classify::classify_error_message;
 
-// The one-shot daemon/worker event trackers (the `daemon event` and
-// `model refused` one-shot surfaces the supervisor notes/adoption/sessions
-// and model-allowlist seams call once per lifecycle event) moved to the
-// child module at the same tree position (session_engine::telemetry::track);
-// every member keeps its pub level and the pub use re-exports keep every
-// external track_* path stable. ZERO bumps.
 mod track;
 pub use track::{
     track_catalog_refresh, track_compaction_abort_declared, track_daemon_event,
@@ -48,57 +25,38 @@ pub use track::{
     track_sessions_archived, track_worker_adoption, track_worker_children_closed,
 };
 
-// The outcome/provider/model/error classification family (the TS
-// `runOutcome`/`telemetryProviderCategory`/`modelCategory`/`errorCategory`
-// ports and their string-matching helpers) moved to the child module at the
-// same tree position (session_engine::telemetry::classify); provider_category
-// keeps its pub level through the re-export (the external callers), and the
-// four pub(super) bumps serve the facade's finalize_run_locked bare calls
-// (and the childrens' use-super globs); the near/contains_* helpers stay
-// private (classify-internal callers).
 mod classify;
 pub use classify::provider_category;
 use classify::{error_category, model_category, opt_value, run_outcome};
 
-// The inline unit battery moved to the child module at the same tree
-// position (session_engine::telemetry::tests); its use-super glob keeps
-// resolving through the facade bindings and re-exports above.
 #[cfg(test)]
 mod tests;
 
-/// The execution mode the wiring layer resolved for this process, e.g.
-/// "interactive" or "unknown" (TS `AgentExecutionMode` surface).
 pub const EXECUTION_MODE_UNKNOWN: &str = "unknown";
 
 /// Telemetry wiring supplied by the composition root (`SessionEngineConfig`).
-/// `None` telemetry (opt-out) installs nothing.
 pub struct TelemetryWiring {
     /// The shared client (base properties are stamped here, per event).
     pub client: TelemetryClient,
-    /// Execution mode for base properties.
     pub execution_mode: Option<String>,
     /// Injectable clock (millis since epoch); defaults to system time.
-    /// Tests pass a controlled clock to assert duration math.
     pub now: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
 
-/// Installed session telemetry: the event subscription plus the in-memory
-/// state the live agent events feed. The handle outlives the agent events and
-/// finalizes the session on `end()`.
+/// Installed session telemetry: the subscription plus the state the live
+/// agent events feed; finalizes the session on `end()`.
 pub struct SessionTelemetry {
     client: TelemetryClient,
     state: Arc<Mutex<TelemetryState>>,
     execution_mode: String,
-    /// `end()` runs exactly once (session close and later kill/shutdown
-    /// paths may both reach it; only the first emits the ended event).
+    /// `end()` runs exactly once; only the first path to reach it emits the
+    /// ended event.
     ended: std::sync::atomic::AtomicBool,
     _subscription: Option<Subscription>,
 }
 
 impl SessionTelemetry {
-    /// A handle with no live subscription: tests drive the state machine via
-    /// [`handle_event`] against the shared state and use this handle for the
-    /// finalize/end surface.
+    /// A handle with no live subscription, for tests driving the state machine directly.
     #[cfg(test)]
     pub(crate) fn detached(
         client: TelemetryClient,
@@ -115,27 +73,22 @@ impl SessionTelemetry {
     }
 }
 
-/// Everything the subscriber accumulates. Guarded by one mutex because the
-/// agent delivers events serially, but the tracker is also fed from
-/// compaction call sites outside the event stream.
+/// Everything the subscriber accumulates. One mutex: the agent delivers events
+/// serially, but the tracker is also fed from compaction call sites outside
+/// the event stream.
 pub(crate) struct TelemetryState {
     session_id: String,
     started_at: u64,
     totals: SessionTotals,
     active_run: Option<ActiveRun>,
     tool_starts: HashMap<String, u64>,
-    /// The unresolved error awaiting a recovery observation: its id pairs
-    /// the occurrence with the later `recovery_update` (retries re-enter
-    /// the loop as new run windows, so the pairing lives here, not on the
-    /// run).
+    /// The unresolved error's id: pairs the occurrence with the later `recovery_update`.
     active_error: Option<ActiveError>,
-    /// Consecutive failed model calls without an intervening success
-    /// (session-scoped like the TS chain; resets on recovery or success).
+    /// Consecutive failed model calls without an intervening success.
     consecutive_failure_count: u64,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
-/// The error awaiting recovery: the occurrence's id.
 struct ActiveError {
     error_id: String,
 }
@@ -184,14 +137,11 @@ impl UsageTotals {
 
 struct ActiveRun {
     started_at: u64,
-    /// `AgentEnd` fired but the run is not finalized yet: the post-run
-    /// compaction drain still counts into it (TS keeps the run open until
-    /// the turn action deactivates; the Rust analog defers to the next
-    /// `AgentStart` or session end).
+    /// `AgentEnd` fired but not finalized yet: the post-run compaction drain
+    /// still counts into it (finalizes at the next `AgentStart` or session end).
     ended: bool,
-    /// Wall time of `AgentEnd`: the run's duration freezes here (TS finalizes
-    /// at turn-action deactivation, a few ms after `AgentEnd`; deferring the
-    /// finalize must not stretch the duration across the idle gap).
+    /// Wall time of `AgentEnd`: the run's duration freezes here; deferring
+    /// the finalize must not stretch it across the idle gap.
     ended_at: Option<u64>,
     first_turn_started_at: Option<u64>,
     first_model_event_ms: Option<u64>,
@@ -207,16 +157,10 @@ struct ActiveRun {
     failover_count: u64,
     usage: UsageTotals,
     last_assistant: Option<AssistantMessage>,
-    // v2 (#2117) per-run tracking:
-    /// The run's uuid (pairs `agent run started` with `agent run
-    /// completed` and the tool summaries).
     run_id: String,
     /// 1-based ordinal of this run window in the session.
     run_index: u64,
-    /// `agent run started` fires when the trigger disambiguates (a
-    /// prompt-run emits its user `MessageStart` right after `AgentStart`;
-    /// a continuation-run goes straight to model events). The timestamp
-    /// is always the `AgentStart` moment.
+    /// Fires once the trigger disambiguates; the timestamp is the `AgentStart` moment.
     run_started_pending: bool,
     trigger: RunTrigger,
     first_reasoning_ms: Option<u64>,
@@ -228,7 +172,6 @@ struct ActiveRun {
     /// The largest gap between consecutive model stream events.
     max_stream_gap_ms: Option<u64>,
     last_stream_event_at: Option<u64>,
-    /// Model calls whose response settled without an error stop reason.
     successful_model_call_count: u64,
     /// False once a model call ended in an error (#2117: pending or
     /// failed calls make usage incomplete).
@@ -236,18 +179,14 @@ struct ActiveRun {
     /// Summed usage cost in USD (estimated; null when incomplete or
     /// pricing was unknown - the conservative direction).
     cost_usd: f64,
-    /// Per-tool-category aggregates for the run's tool summary events.
     tool_summary: HashMap<ToolCategory, ToolCategoryStats>,
 }
 
-/// One tool category's per-run aggregates (`agent tool summary`).
 #[derive(Debug, Default)]
 struct ToolCategoryStats {
     calls: u64,
     failures: u64,
     duration_ms: u64,
-    /// Failures later followed by a successful call of the same category
-    /// within the run (the recovered signal).
     recovered: u64,
     last_call_failed: bool,
 }
@@ -259,13 +198,10 @@ pub struct SkillCounts {
 }
 
 /// Install the telemetry subscriber on an agent and emit `agent started`.
-/// The subscriber consumes every [`AgentEvent`]; the state it builds is
-/// reachable through the returned handle for session-end finalization.
 ///
 /// # Errors
 ///
-/// The current implementation never returns `Err`; the installed telemetry
-/// is always handed back in `Ok`.
+/// The current implementation never returns `Err`.
 ///
 /// # Panics
 ///
@@ -330,12 +266,8 @@ pub async fn install_session_telemetry(
 }
 
 impl SessionTelemetry {
-    /// A compaction completed (feed from the compaction seams; TS
-    /// `compaction_end` handling). Counts toward the active run when one
-    /// exists, exactly like the TS subscriber — compactions outside a run
-    /// never inflate session totals. The duration (measured centrally by
-    /// the compaction executor) also fires the `agent timing` compaction
-    /// stage.
+    /// A compaction completed: counts toward the active run when one exists
+    /// (compactions outside a run never inflate session totals).
     ///
     /// # Panics
     ///
@@ -357,11 +289,8 @@ impl SessionTelemetry {
         }
     }
 
-    /// One auto-retry event from the retry seam (feed from the retry
-    /// callback; TS `auto_retry_start`/`auto_retry_end` handling):
-    /// `Start` counts the retry (and a backup-provider switch as a
-    /// failover) into the active run and measures the retry wait; `End`
-    /// resolves the unresolved error's recovery (`recovery_update`).
+    /// `Start` counts the retry (and a backup-provider switch as a failover)
+    /// into the active run; `End` resolves the recovery (`recovery_update`).
     ///
     /// # Panics
     ///
@@ -391,14 +320,9 @@ impl SessionTelemetry {
             AutoRetryEvent::End {
                 success, attempt, ..
             } => {
-                // A SUCCESSFUL retry resolves the error it was retrying
-                // (the active occurrence's id): one `recovery_update`,
-                // paired with that occurrence. A FAILED retry adds no
-                // recovery update at all - the retried attempt's own
-                // failure was recorded as its own new occurrence at its
-                // `MessageEnd` (the chain lives via that occurrence), and
-                // a mispaired update to the original id would claim the
-                // wrong recovery.
+                // A SUCCESSFUL retry resolves the active occurrence:
+                // one `recovery_update`. A FAILED retry adds no update -
+                // a mispaired update would claim the wrong recovery.
                 if *success {
                     if let Some(active) = state.active_error.take() {
                         AgentError {
@@ -416,9 +340,7 @@ impl SessionTelemetry {
                         }
                         .track(&self.client);
                     }
-                    // The failed model call already counted its own chain
-                    // link at its `MessageEnd`; the success resets the
-                    // chain (the give-up never double-counts).
+                    // A success resets the chain.
                     state.consecutive_failure_count = 0;
                 }
             }
@@ -426,8 +348,7 @@ impl SessionTelemetry {
     }
 
     /// `agent feature outcome` (v2, #2117): a feature attempt's observed
-    /// result at a session-engine seam; `configuration_choice` carries
-    /// the fixed choice for fixed-choice commands.
+    /// result; `configuration_choice` carries the fixed choice.
     pub fn note_feature_outcome(
         &self,
         feature_name: &'static str,
@@ -444,10 +365,8 @@ impl SessionTelemetry {
         .track(&self.client);
     }
 
-    /// Finalize any active run, emit `agent session ended`, and flush.
-    /// The host calls this at session close (TUI exit, worker shutdown,
-    /// kill); the `ended` flag makes a second close path a no-op, matching
-    /// the TS single `registerDisposeCallback` firing.
+    /// Finalize any active run, emit `agent session ended`, and flush;
+    /// the `ended` flag makes a second close path a no-op.
     ///
     /// # Errors
     ///
@@ -491,18 +410,16 @@ impl SessionTelemetry {
             properties.set("cache_read_tokens", Value::from(totals.usage.cache_read));
             properties.set("cache_write_tokens", Value::from(totals.usage.cache_write));
             properties.set("total_tokens", Value::from(totals.usage.total_tokens));
-            // v2 (#2117): the session's terminal outcome. `end()` is the
-            // normal dispose path (interactive exit, worker shutdown); a
-            // crash never reaches it, and the archive path emits
-            // `session archived` first.
+            // v2 (#2117): `end()` is the normal dispose path; a crash never
+            // reaches it (the archive path emits `session archived` first).
             properties.set("terminal_outcome", Value::from("success"));
         }
         self.client.track("agent session ended", properties);
         self.client.flush().await
     }
 
-    /// `session archived` (schema v1): the session reached the archive state
-    /// (daemon `kill`). Lifetime in ms; emitted before `end()` on that path.
+    /// `session archived` (schema v1): the session reached the archive
+    /// state (daemon `kill`); emitted before `end()` on that path.
     ///
     /// # Panics
     ///
@@ -519,10 +436,8 @@ impl SessionTelemetry {
         self.client.track("session archived", properties);
     }
 
-    /// `skill used`: a `/skill:<name>` submission expanded into its skill
-    /// block. Feed from the `AgentSession::prompt_with_images` expansion
-    /// seam; `source` reports how the invocation arrived (`prompt`,
-    /// `steer`, `follow_up`).
+    /// `skill used`: a `/skill:<name>` submission expanded into its
+    /// skill block; `source` reports how the invocation arrived.
     pub fn note_skill_used(&self, skill_name: &str, skill_kind: &str, source: &str) {
         let mut properties = self.session_properties();
         properties.set("skill_name", Value::from(skill_name));
@@ -531,10 +446,9 @@ impl SessionTelemetry {
         self.client.track("skill used", properties);
     }
 
-    /// `rlm child usage attributed` (schema v1): one durable child-usage
-    /// attribution row landed in the parent session (the RLM producer's
-    /// flush). Primitives only — the origin label and the batch's token
-    /// counts and cost; never prompt, session, or file content.
+    /// `rlm child usage attributed`: one durable child-usage row landed.
+    /// Primitives only — origin, token counts, cost; never prompt or session
+    /// content.
     pub fn note_child_usage_attributed(
         &self,
         origin: &str,
@@ -559,16 +473,14 @@ impl SessionTelemetry {
         self.client.track("rlm child usage attributed", properties);
     }
 
-    /// `agent command used`: builtin session commands only, canonical name.
-    /// Feed from `session_commands::execute_session_command` (TS
-    /// `captureAgentCommandUsed`).
+    /// `agent command used`: builtin session commands only, canonical
+    /// name.
     pub fn note_command_used(&self, command_name: &str) {
         let mut properties = self.session_properties();
         properties.set("command_name", Value::from(command_name));
         self.client.track("agent command used", properties);
     }
 
-    /// Base properties + `session_id` for per-event properties.
     fn session_properties(&self) -> Properties {
         let mut properties = base_properties(&self.execution_mode);
         let state = self.state.lock().expect("telemetry state poisoned");
@@ -577,8 +489,8 @@ impl SessionTelemetry {
     }
 }
 
-/// One agent event → state machine step. Split from `install` so tests can
-/// drive scripted event sequences without a live agent.
+/// One agent event → state machine step; split out so tests can drive
+/// scripted sequences without a live agent.
 fn handle_event(
     client: &TelemetryClient,
     execution_mode: &str,
@@ -590,9 +502,7 @@ fn handle_event(
     match event {
         AgentEvent::AgentStart => {
             // The previous run finalizes here (not at AgentEnd): a post-run
-            // compaction drained between AgentEnd and this start must land in
-            // that run, exactly like the TS turn-action window. A missing
-            // AgentEnd (misbehaving emitter) still cannot lose run facts.
+            // compaction drained in between must land in that run.
             finalize_run_locked(client, execution_mode, &mut state);
             let run_index = state.totals.run_count + 1;
             state.active_run = Some(ActiveRun {
@@ -632,8 +542,7 @@ fn handle_event(
         AgentEvent::MessageStart { message } => {
             if message.role() == "user" {
                 state.totals.prompt_count += 1;
-                // A prompt-run's user message lands right after
-                // `AgentStart`: the run's trigger is a fresh prompt.
+                // A user message right after `AgentStart` marks a prompt-run.
                 resolve_run_started(client, &mut state, RunTrigger::Prompt);
             }
         }
@@ -651,9 +560,7 @@ fn handle_event(
             ..
         } => {
             if state.active_run.is_some() {
-                // A continuation-run's first event is a model event (no
-                // user message ever lands inside it): the retry/goal
-                // re-entry disambiguates the trigger.
+                // A model event with no user message marks a continuation-run.
                 resolve_run_started(client, &mut state, RunTrigger::Continuation);
                 let Some(run) = state.active_run.as_mut() else {
                     return;
@@ -694,8 +601,6 @@ fn handle_event(
                         }
                     }
                 }
-                // The stream gap: the largest quiet stretch between
-                // consecutive model events within the run.
                 if let Some(last) = run.last_stream_event_at {
                     let gap = now.saturating_sub(last);
                     run.max_stream_gap_ms =
@@ -709,9 +614,8 @@ fn handle_event(
                 assistant,
             )) = message
             {
-                // A continuation-run without stream events (a non-streamed
-                // response) still disambiguates at its first assistant
-                // message end.
+                // A non-streamed continuation-run still disambiguates at its
+                // first assistant message end.
                 resolve_run_started(client, &mut state, RunTrigger::Continuation);
                 let is_error = assistant.stop_reason == StopReason::Error;
                 let error_message = is_error.then(|| assistant.error_message.clone()).flatten();
@@ -732,8 +636,7 @@ fn handle_event(
                     run.cost_usd += cost_total;
                 }
                 if is_error {
-                    // The error occurrence: classification only, fixed
-                    // diagnostics; the raw provider text never uploads.
+                    // Classification only: the raw provider text never uploads.
                     let run_started = state.active_run.as_ref().map_or(now, |run| run.started_at);
                     state.consecutive_failure_count += 1;
                     let error_id = uuid();
@@ -768,8 +671,6 @@ fn handle_event(
                     }
                     agent_error.track(client);
                     state.active_error = Some(ActiveError { error_id });
-                    // The `time_to_error` timing stage measures the failed
-                    // run window to its failure moment.
                     AgentTiming {
                         stage: TimingStage::TimeToError,
                         duration_ms: Some(now.saturating_sub(run_started)),
@@ -779,8 +680,7 @@ fn handle_event(
                     }
                     .track(client);
                 } else {
-                    // A successful model call clears the consecutive-failure
-                    // chain (the retry evidence on the next occurrence).
+                    // A success clears the consecutive-failure chain.
                     state.consecutive_failure_count = 0;
                 }
             }
@@ -834,12 +734,9 @@ fn handle_event(
             }
             .track(client);
             if is_error {
-                // A tool failure is an error occurrence too: component
-                // `tools`, operation `execute`, stage `tool_execution`.
-                // The tool output never uploads (privacy contract), so the
-                // subtype is unknown. Tool failures never touch the
-                // model-failure chain (the consecutive counter is the
-                // provider chain's own signal).
+                // A tool failure is an error occurrence too; the subtype is unknown
+                // because the tool output never uploads. Tool failures never touch
+                // the model-failure chain.
                 AgentError {
                     error_id: uuid(),
                     kind: Some(ErrorEventKind::Occurrence),
@@ -863,16 +760,13 @@ fn handle_event(
                 run.ended_at = Some(now);
             }
         }
-        // TurnEnd carries no facts the TS subscriber used (turn_count comes
-        // from TurnStart); ToolExecutionUpdate is mid-execution progress.
+        // TurnEnd carries no facts; ToolExecutionUpdate is mid-execution
+        // progress.
         AgentEvent::TurnEnd { .. } | AgentEvent::ToolExecutionUpdate { .. } => {}
     }
 }
 
-/// Fire the pending `agent run started` when the trigger disambiguated.
-/// The event's moment is always the run's `AgentStart` (the
-/// `MessageStart`/model-event that names the trigger arrives within the
-/// same run window, microseconds later).
+/// Fire the pending `agent run started` once the trigger disambiguated.
 fn resolve_run_started(client: &TelemetryClient, state: &mut TelemetryState, trigger: RunTrigger) {
     let Some(run) = state.active_run.as_mut() else {
         return;
@@ -891,8 +785,7 @@ fn resolve_run_started(client: &TelemetryClient, state: &mut TelemetryState, tri
     .track(client);
 }
 
-/// Finalize the active run and emit `agent run completed` (TS
-/// `finalizeRun`), merging run totals into session totals.
+/// Finalize the active run and emit `agent run completed`.
 fn finalize_run(client: &TelemetryClient, execution_mode: &str, state: &mut TelemetryState) {
     finalize_run_locked(client, execution_mode, state);
 }
@@ -914,9 +807,8 @@ fn finalize_run_locked(client: &TelemetryClient, execution_mode: &str, state: &m
     }
     state.totals.usage.merge(&run.usage);
 
-    // A run window that never disambiguated its trigger (no user message,
-    // no model event - an emitter edge) still reports `agent run started`
-    // with the unknown trigger; the pair never goes missing.
+    // A run that never disambiguated its trigger still reports `agent run
+    // started` with the unknown trigger; the pair never goes missing.
     if run.run_started_pending {
         run.run_started_pending = false;
         AgentRunStarted {
@@ -942,7 +834,7 @@ fn finalize_run_locked(client: &TelemetryClient, execution_mode: &str, state: &m
         .track(client);
     }
 
-    // The `stream_gap` timing stage: the run's largest quiet stretch.
+    // The `stream_gap` timing stage.
     AgentTiming {
         stage: TimingStage::StreamGap,
         duration_ms: run.max_stream_gap_ms,
@@ -996,7 +888,6 @@ fn finalize_run_locked(client: &TelemetryClient, execution_mode: &str, state: &m
         "error_category",
         error_category(run.last_assistant.as_ref()),
     );
-    // v2 (#2117) enrichment:
     properties.set("run_id", Value::from(run.run_id.as_str()));
     properties.set("run_index", Value::from(run.run_index));
     properties.set("trigger", Value::from(run.trigger.as_str()));
@@ -1013,8 +904,8 @@ fn finalize_run_locked(client: &TelemetryClient, execution_mode: &str, state: &m
         properties.set("usage_complete", Value::from(run.usage_complete));
     }
     if run.usage_complete && run.usage.model_call_count > 0 && run.cost_usd > 0.0 {
-        // Estimated cost requires known pricing and complete usage for
-        // every call; the conservative direction keeps it null otherwise.
+        // Estimated cost requires known pricing and complete usage; otherwise
+        // null (the conservative direction).
         properties.set("estimated_cost_usd", Value::from(run.cost_usd));
     }
     if run.last_assistant.as_ref().map(|m| m.stop_reason) == Some(StopReason::Error) {
@@ -1039,9 +930,7 @@ fn finalize_run_locked(client: &TelemetryClient, execution_mode: &str, state: &m
     client.track("agent run completed", properties);
 }
 
-/// The #2117 `terminal_outcome` vocabulary: the legacy run outcome
-/// (`success`/`error`/`aborted`) onto the terminal vocabulary (the legacy
-/// `aborted` is the terminal `cancelled`).
+/// The #2117 `terminal_outcome` vocabulary (legacy `aborted` is the `cancelled`).
 fn terminal_outcome(run_outcome: &str) -> &'static str {
     match run_outcome {
         "success" => "success",
@@ -1063,14 +952,9 @@ fn stop_reason(last_assistant: Option<&AssistantMessage>) -> &'static str {
     }
 }
 
-/// Build the product telemetry client from settings (opt-in already
-/// resolved by the caller): `PostHog` sink when endpoint+key are configured
-/// (env `PRIME_AGENT_TELEMETRY_ENDPOINT`/`_API_KEY` override settings
-/// `telemetry.posthog.*`), the no-op sink when they are not (the operator
-/// supplies values at deploy time), plus the local JSONL transparency
-/// mirror (default on, `telemetry.localMirror` disables it). Never fails:
-/// a broken install id falls back to a no-op client (TS parity — capture
-/// disables itself when the installation identity cannot be created).
+/// Build the product telemetry client: `PostHog` sink when endpoint+key are
+/// configured, a no-op sink otherwise, plus the local JSONL mirror (default on).
+/// Never fails: a broken install id falls back to a no-op client.
 pub fn build_client(
     settings: &crate::settings::SettingsManager,
     agent_dir: &std::path::Path,
@@ -1085,8 +969,7 @@ pub fn build_client(
             if let Some(endpoint) = endpoint {
                 sinks.push(Arc::new(pa_telemetry::PostHogSink::new(&endpoint)));
             } else {
-                // Empty configuration: events queue nowhere (no-op), the
-                // same posture an opt-out installs.
+                // Empty configuration: events queue nowhere, like an opt-out.
                 sinks.push(Arc::new(pa_telemetry::NoopSink));
             }
             let local_mirror = settings

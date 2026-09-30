@@ -1,5 +1,5 @@
-//! The git-context concern (moved with its concern): the quiet git
-//! probes and the header's git-context capture (TS captureGitContext).
+//! The git-context concern: the quiet git probes and the header's git-context capture (TS
+//! `captureGitContext`).
 
 use super::{GitContext, Path};
 
@@ -25,9 +25,8 @@ fn run_git_probe(cwd: &Path, args: &[&str]) -> Option<String> {
 ///
 /// Contract (TS `captureGitContext`): every field is independently optional;
 /// the context exists when at least one probe succeeds. `branch` is
-/// `--show-current`, so a detached HEAD yields no branch. The remote URL is
-/// normalized through the git-source parser when it parses, else kept
-/// verbatim.
+/// `--show-current` (a detached HEAD yields no branch); the remote URL is
+/// normalized through the git-source parser when it parses, else verbatim.
 #[must_use]
 pub fn capture_git_context(cwd: &Path) -> Option<GitContext> {
     let commit = run_git_probe(cwd, &["rev-parse", "HEAD"]);

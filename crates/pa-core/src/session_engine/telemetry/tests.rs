@@ -1,6 +1,6 @@
-//! The telemetry unit battery (moved with its concerns): the scripted
-//! run state machine, the outcome/provider/model/error categories, and the
-//! session-end finalize surface.
+//! The telemetry unit battery: the scripted run state machine, the
+//! outcome/provider/model/error categories, and the session-end finalize
+//! surface.
 use std::time::Duration;
 
 use pa_agent::stream::AssistantMessageEvent;
@@ -211,7 +211,6 @@ async fn emits_aggregate_metrics_without_content() {
         .await
         .is_empty());
 
-    // Session end finalizes the open run and emits the session totals.
     fixture.clock.set(1_200);
     let telemetry = SessionTelemetry::detached(
         fixture.client.clone(),
@@ -259,8 +258,6 @@ async fn emits_aggregate_metrics_without_content() {
     assert_eq!(ended[0]["total_tokens"], serde_json::json!(170));
 }
 
-/// TS "waits for post-run compaction before finalizing run metrics":
-/// a compaction drained after `AgentEnd` still counts into that run.
 #[tokio::test]
 async fn post_run_compaction_counts_into_the_open_run() {
     let fixture = fixture();
@@ -292,8 +289,6 @@ async fn post_run_compaction_counts_into_the_open_run() {
     assert_eq!(runs[0]["compaction_count"], serde_json::json!(1));
 }
 
-/// A compaction with no open run (between runs) does not inflate session
-/// totals — TS counts compactions only while a run exists.
 #[tokio::test]
 async fn compaction_between_runs_is_not_counted() {
     let fixture = fixture();
@@ -327,14 +322,11 @@ async fn compaction_between_runs_is_not_counted() {
     emit(&fixture, AgentEvent::AgentStart);
     telemetry.note_compaction(Some(45));
     let runs = event_properties(&fixture.mock, "agent run completed").await;
-    // Third run has no compaction; second run has none either.
     assert!(runs
         .iter()
         .all(|run| run["compaction_count"] == serde_json::json!(0)));
 }
 
-/// Error and abort outcomes carry the TS `runOutcome` semantics and the
-/// error-category classifier.
 #[tokio::test]
 async fn error_and_aborted_outcomes() {
     let fixture = fixture();
@@ -367,7 +359,6 @@ async fn error_and_aborted_outcomes() {
     assert_eq!(runs[1]["error_category"], serde_json::Value::Null);
 }
 
-/// Error-category classifier matrix (TS `errorCategory`).
 #[test]
 fn error_categories() {
     fn category(error: &str) -> String {
@@ -397,8 +388,6 @@ fn error_categories() {
     );
 }
 
-/// Provider/model categories (TS `telemetryProviderCategory` /
-/// `modelCategory`).
 #[test]
 fn provider_and_model_categories() {
     assert_eq!(provider_category(Some("prime")), "prime");
@@ -411,8 +400,6 @@ fn provider_and_model_categories() {
     assert_eq!(model_category("my-finetune"), "custom");
 }
 
-/// `tool executed` events: tool name + duration + outcome, no arguments
-/// or results, per-execution.
 #[tokio::test]
 async fn tool_executed_events_carry_name_duration_outcome() {
     let fixture = fixture();
@@ -439,7 +426,6 @@ async fn tool_executed_events_carry_name_duration_outcome() {
     assert!(!all.contains("private tool output"));
 }
 
-/// `agent command used` events: canonical command name only.
 #[tokio::test]
 async fn command_used_event_shape() {
     let fixture = fixture();
@@ -455,8 +441,6 @@ async fn command_used_event_shape() {
     assert_eq!(commands[0]["command_name"], serde_json::json!("compact"));
 }
 
-/// `skill used` events: name, kind, and arrival source; never prompt
-/// content.
 #[tokio::test]
 async fn skill_used_event_shape() {
     let fixture = fixture();
@@ -480,9 +464,6 @@ async fn skill_used_event_shape() {
     assert!(!all.contains("skill content"));
 }
 
-/// `rlm child usage attributed`: the origin label and the batch's
-/// primitives; the token counts and cost round-trip, and nothing
-/// else rides.
 #[tokio::test]
 async fn child_usage_attributed_event_shape() {
     let fixture = fixture();
@@ -502,7 +483,6 @@ async fn child_usage_attributed_event_shape() {
     assert!((events[0]["cost"].as_f64().unwrap() - 0.008_995_7).abs() < 1e-9);
 }
 
-/// `build_client`: settings-provided `PostHog` endpoint + the local mirror.
 #[tokio::test]
 async fn build_client_resolves_settings_posthog_and_mirror() {
     let dir = tempfile::tempdir().unwrap();
@@ -513,7 +493,6 @@ async fn build_client_resolves_settings_posthog_and_mirror() {
     assert_eq!(client.dropped_count(), 0);
 }
 
-/// Two runs in one session: totals merge, per-run events separate.
 #[tokio::test]
 async fn multiple_runs_merge_into_session_totals() {
     let fixture = fixture();
@@ -540,9 +519,6 @@ async fn multiple_runs_merge_into_session_totals() {
     assert_eq!(runs.len(), 2);
 }
 
-/// `agent run started` (v2): fires once per run window, at the right
-/// moment, with the prompt trigger when a user message drives the run
-/// and a `run_index` that pairs it with the completed event.
 #[tokio::test]
 async fn run_started_fires_with_prompt_trigger_and_run_index() {
     let fixture = fixture();
@@ -556,7 +532,6 @@ async fn run_started_fires_with_prompt_trigger_and_run_index() {
     fixture.clock.set(1_000);
     emit(&fixture, AgentEvent::AgentStart);
     emit(&fixture, AgentEvent::TurnStart);
-    // The user message right after AgentStart names the trigger.
     emit(
         &fixture,
         AgentEvent::MessageStart {
@@ -592,15 +567,12 @@ async fn run_started_fires_with_prompt_trigger_and_run_index() {
     );
 }
 
-/// A continuation run (the auto-retry re-entry: no user message inside
-/// the window) reports the continuation trigger.
 #[tokio::test]
 async fn continuation_run_reports_continuation_trigger() {
     let fixture = fixture();
     let assistant = assistant_message();
     emit(&fixture, AgentEvent::AgentStart);
     emit(&fixture, AgentEvent::TurnStart);
-    // No user message: the first model event names the trigger.
     emit(&fixture, message_end_event(assistant));
     emit(
         &fixture,
@@ -614,9 +586,6 @@ async fn continuation_run_reports_continuation_trigger() {
     assert_eq!(starts[0]["trigger"], serde_json::json!("continuation"));
 }
 
-/// `agent tool summary` (v2): per-category call/failure/recovered
-/// counts and durations at run finalize; a failure later followed by a
-/// success of the same category counts as recovered.
 #[tokio::test]
 async fn tool_summary_per_category_with_recovery() {
     let fixture = fixture();
@@ -630,7 +599,6 @@ async fn tool_summary_per_category_with_recovery() {
     emit(&fixture, edit_start);
     fixture.clock.set(1_200);
     emit(&fixture, edit_end);
-    // The recovered call: the same category fails then succeeds.
     let (edit_retry_start, edit_retry_end) = tool_execution_event("edit", false);
     emit(&fixture, edit_retry_start);
     fixture.clock.set(1_250);
@@ -660,7 +628,6 @@ async fn tool_summary_per_category_with_recovery() {
     assert_eq!(edit["failure_count"], serde_json::json!(1));
     assert_eq!(edit["recovered_count"], serde_json::json!(1));
     assert_eq!(edit["duration_ms"], serde_json::json!(150));
-    // The per-execution `agent timing` tool events fired too.
     let timings = event_properties(&fixture.mock, "agent timing").await;
     let tool_timings: Vec<_> = timings
         .iter()
@@ -672,10 +639,9 @@ async fn tool_summary_per_category_with_recovery() {
     assert_eq!(tool_timings[1]["outcome"], serde_json::json!("error"));
 }
 
-/// `agent error` (v2): a failed model call emits one occurrence with
-/// the classification (fixed diagnostic only - never the raw provider
-/// text), and the retry's success emits the recovery update with the
-/// same error id.
+/// `agent error` (v2): a failed model call emits one occurrence with the classification
+/// (fixed diagnostic only - never the raw provider text), and the retry's success emits the
+/// recovery update with the same error id.
 #[tokio::test]
 async fn error_occurrence_and_recovery_pair_by_error_id() {
     let fixture = fixture();
@@ -773,7 +739,6 @@ async fn error_occurrence_and_recovery_pair_by_error_id() {
         .find(|timing| timing["stage"] == serde_json::json!("retry_wait"))
         .expect("retry_wait timing");
     assert_eq!(retry_wait["duration_ms"], serde_json::json!(500));
-    // The failed run window reports the retry counts.
     emit(&fixture, AgentEvent::AgentStart);
     let runs = event_properties(&fixture.mock, "agent run completed").await;
     assert_eq!(runs.len(), 1);
@@ -790,8 +755,6 @@ async fn error_occurrence_and_recovery_pair_by_error_id() {
     );
 }
 
-/// The enriched `agent run completed` (v2): the run pair id, the
-/// stop reason, the usage completeness and the estimated cost.
 #[tokio::test]
 async fn run_completed_v2_enrichment() {
     let fixture = fixture();
@@ -830,8 +793,6 @@ async fn run_completed_v2_enrichment() {
     assert_eq!(ended[0]["terminal_outcome"], serde_json::json!("success"));
 }
 
-/// A tool failure emits its own error occurrence (component `tools`)
-/// without ever uploading the tool output.
 #[tokio::test]
 async fn tool_failure_emits_tools_error_occurrence() {
     let fixture = fixture();
@@ -848,8 +809,6 @@ async fn tool_failure_emits_tools_error_occurrence() {
     assert!(!all.contains("private tool output"));
 }
 
-/// The stream-gap timing: the largest quiet stretch between model
-/// events reports on the run's timing stage.
 #[tokio::test]
 async fn stream_gap_tracks_the_largest_quiet_stretch() {
     let fixture = fixture();
@@ -881,10 +840,9 @@ async fn stream_gap_tracks_the_largest_quiet_stretch() {
     assert_eq!(runs[0]["run_to_first_text_ms"], serde_json::json!(0));
 }
 
-/// The bot-found edges, pinned: the trigger lands on run completed (the
-/// catalog lists it), an aborted run's terminal outcome is the #2117
-/// `cancelled`, a tool failure never touches the model-failure chain,
-/// and a retry give-up never double-counts the chain.
+/// The bot-found edges, pinned: the trigger lands on run completed (the catalog lists it),
+/// an aborted run's terminal outcome is the #2117 `cancelled`, a tool failure never touches
+/// the model-failure chain, and a retry give-up never double-counts the chain.
 #[tokio::test]
 async fn bot_edges_the_trigger_lands_and_terminal_outcome_maps() {
     let fixture = fixture();
@@ -966,10 +924,8 @@ async fn bot_edges_the_give_up_never_double_counts_the_chain() {
         fixture.state.clone(),
         "interactive".to_string(),
     );
-    // The retry gives up: the failed call already counted its link, and
-    // a FAILED retry emits no recovery update at all (the retried
-    // attempt's own failure is its own new occurrence when one happens -
-    // a mispaired update would claim the wrong recovery).
+    // The retry gives up: a FAILED retry emits no recovery update at
+    // all — a mispaired update would claim the wrong recovery.
     telemetry.note_auto_retry_event(&AutoRetryEvent::End {
         success: false,
         attempt: 1,

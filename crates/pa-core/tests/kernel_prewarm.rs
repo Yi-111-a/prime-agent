@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,22 +8,9 @@
     clippy::cast_precision_loss
 )]
 
-//! Verifier integration tests for the session-creation kernel prewarm (TS
-//! `prewarmIpythonKernel` from `createDefaultRuntimeFactory`, gated by
-//! `rlmDepth === 0` in the session):
-//!
-//! - a main session whose engine config requests the prewarm boots its
-//!   kernel in the background at creation — observable through the
-//!   `kernel bootstrap` telemetry event — so a compaction with NO `ipython`
-//!   tool use still lands the `ipython_state` notice row (TS parity: the
-//!   TS daemon prewarms, so its sessions always have the running kernel the
-//!   post-compaction notice reads);
-//! - a depth-1 (subagent) session keeps the lazy first-call start: the same
-//!   config boots nothing.
-//!
-//! The kernel Python is ambient product state (the auto-bootstrapped kernel
-//! venv); like `kernel_lifecycle.rs`, these tests skip (with a note) on
-//! machines without a live install so the suite stays hermetic elsewhere.
+//! Verifier integration tests for the session-creation kernel prewarm: a main session with the
+//! config flag boots its kernel at creation (so a compaction with no `ipython` use still lands the
+//! `ipython_state` notice); a depth-1 subagent session keeps the lazy first-call start.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -39,14 +24,12 @@ use pa_core::settings::SettingsManager;
 use pa_types::session::FileEntry;
 
 /// The faux provider registry is process-global and both tests drive it:
-/// the std lock serializes them (they are the only contenders, so holding
-/// it across awaits is safe).
+/// the std lock serializes them (the only contenders).
 static FAUX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The kernel Python with prime-agent-runtime installed (the interpreter
-/// the session-path provisioner resolves). Skipped (with a note) on
-/// machines without a live install; set `PA_CORE_KERNEL_PYTHON` to point at
-/// an explicit interpreter instead.
+/// The kernel Python with prime-agent-runtime installed (the interpreter the session-path
+/// provisioner resolves). Skipped (with a note) on machines without a live install; set
+/// `PA_CORE_KERNEL_PYTHON` to point at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_CORE_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -151,11 +134,8 @@ async fn wait_for_kernel_boot(client: &pa_telemetry::TelemetryClient, agent_dir:
     }
 }
 
-/// The prewarm fires at creation (no `ipython` tool use anywhere): the
-/// background boot reports through telemetry, the session's compaction sees
-/// a running kernel, and the hidden `ipython_state` notice lands on the
-/// durable entries — with the empty-namespace arm, because the model never
-/// ran a cell.
+/// The prewarm fires at creation (no `ipython` tool use anywhere): the hidden `ipython_state`
+/// notice lands with the empty-namespace arm, because the model never ran a cell.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn prewarmed_kernel_lands_compaction_notice_without_tool_use() {
@@ -208,10 +188,8 @@ async fn prewarmed_kernel_lands_compaction_notice_without_tool_use() {
     .await
     .expect("create the prewarmed session");
 
-    // The prewarm's boot, without a single ipython tool call.
     wait_for_kernel_boot(&client, &agent_dir).await;
 
-    // Plain text turns: history for the compaction, no tool use.
     for turn in ["history turn one", "history turn two"] {
         let outcome = engine
             .prompt(turn, PromptOptions::default())
@@ -243,11 +221,9 @@ async fn prewarmed_kernel_lands_compaction_notice_without_tool_use() {
         content.contains("Your Python kernel persisted through compaction"),
         "{content}"
     );
-    // The live-names detail arm is environment-dependent (the bootstrap
-    // pre-imports the installed Python skills as live names), so only the
-    // persistence sentence is pinned here — same scoping as the battery's
-    // kernel-notice differential.
-    // The durable row landed on the session entries.
+    // The live-names detail arm is environment-dependent (the bootstrap pre-imports the installed
+    // Python skills as live names), so only the persistence sentence is pinned here — same scoping
+    // as the battery's kernel-notice differential.
     let entries = engine.session.entries().await;
     assert!(
         entries.iter().any(|entry| match entry {
@@ -260,9 +236,8 @@ async fn prewarmed_kernel_lands_compaction_notice_without_tool_use() {
     );
 }
 
-/// The TS depth gate: subagent sessions (rlmDepth > 0) keep the lazy
-/// first-call start even when the runtime factory passes
-/// `prewarmIpythonKernel: true` — no boot, no `kernel bootstrap` event.
+/// The TS depth gate: subagent sessions keep the lazy first-call start
+/// even when the runtime factory passes `prewarmIpythonKernel: true`.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn subagent_sessions_stay_lazy_despite_the_prewarm_flag() {
@@ -318,8 +293,7 @@ async fn subagent_sessions_stay_lazy_despite_the_prewarm_flag() {
         "the subagent keeps the lazy ipython tool: {tool_names:?}"
     );
 
-    // Long enough for a wrongly-fired prewarm to boot and report; the
-    // lazy session reports nothing.
+    // Long enough for a wrongly-fired prewarm to boot and report; the lazy session reports nothing.
     let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline {
         let events = kernel_bootstrap_events(&client, &agent_dir).await;

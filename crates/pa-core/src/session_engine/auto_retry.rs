@@ -1,17 +1,7 @@
-//! Interactive provider-failure auto-retry: the session-level retry loop for
-//! user-driven turns (TS `AgentSession` `_handleRetryableError` /
-//! `_retryAfterDelay` / `_finishActiveRetryWithFailure`).
-//!
-//! The one-shot completion helper in [`super::provider_retry`] serves
-//! side questions, compaction, and refinement; this module is the interactive
-//! counterpart that re-issues the whole failed turn. It owns only the retry
-//! decision and the event surface: the caller drives the actual turn (and
-//! removes the failed assistant message from the loop context before
-//! re-issuing, like the TS loop does).
-//!
-//! Retry events are delivered as data so any host (daemon worker, direct
-//! attach) can serialize them onto its own event plane with the TS wire
-//! shape (`auto_retry_start` / `auto_retry_end`).
+//! Interactive provider-failure auto-retry: the session-level retry loop
+//! for user-driven turns ([`super::provider_retry`] is the one-shot helper).
+//! This module owns only the retry decision and the event surface: the
+//! caller drives the actual turn; events are delivered as data.
 
 use std::future::Future;
 
@@ -47,13 +37,10 @@ pub enum AutoRetryEvent {
         max_attempts: u32,
         delay_ms: u64,
         error_message: String,
-        /// Which kind of retry this is (quick retry vs provider switch).
         reason: RetryStartReason,
     },
-    /// `auto_retry_end`: the loop settled. `attempt` is the number of retries
-    /// performed; `final_error` is present exactly when `success` is false;
-    /// `restored_model` is the `"provider/model-id"` primary restored after
-    /// a provider-switch retry succeeded.
+    /// `auto_retry_end`: the loop settled. `final_error` is present exactly
+    /// when `success` is false; `restored_model` is the restored primary.
     End {
         success: bool,
         attempt: u32,
@@ -62,20 +49,12 @@ pub enum AutoRetryEvent {
     },
 }
 
-/// Drive `attempt` under the shared retry policy until it settles.
+/// Drive `attempt` under the shared retry policy until it settles: a turn
+/// with stop reason `Error` is classified against the policy; `emit` observes
+/// retry events, `wait` sleeps one delay (returning `false` aborts).
 ///
-/// `attempt` runs one turn and returns its final assistant message; a turn
-/// whose final message has stop reason `Error` is a provider failure and is
-/// classified against the policy. `emit` observes the retry events as they
-/// happen; `wait` sleeps one delay (returning `false` aborts the loop, like
-/// the TS abort controller). Returns the final assistant message — error or
-/// not — so the caller renders it like every other outcome.
-///
-/// `park` is the quota-park seam (TS #2375): consulted when a
-/// server-requested wait exceeds the policy cap (this port's
-/// `reset-too-far`). A `Some` outcome parks the session — the chain
-/// surfaces the parked status as the final `auto_retry_end` instead of
-/// the give-up — and `None` keeps the immediate give-up.
+/// `park` is the quota-park seam, consulted when a server-requested wait
+/// exceeds the policy cap: `Some` parks the session, `None` gives up.
 ///
 /// # Errors
 ///
@@ -117,13 +96,12 @@ where
         if signal.is_some_and(AbortSignal::is_aborted) {
             return Ok(with_stop_reason_aborted(message));
         }
-        // Non-retryable failures never enter the TS retry bookkeeping: a
-        // permanent failure that follows earlier transient retries only
-        // closes the active retry (`_finishActiveRetryWithFailure`).
+        // Non-retryable failures never enter the retry bookkeeping: a
+        // permanent failure only closes the active retry.
         let non_retryable = is_agent_lifecycle_failure(&message)
             || is_faux_provider_queue_exhausted(&message)
-            // A context overflow can never succeed unchanged (TS
-            // `_isRetryableError`): the compact-and-retry recovery owns it.
+            // A context overflow can never succeed unchanged: the
+            // compact-and-retry recovery owns it.
             || is_context_overflow_failure(&message, context_window)
             || is_unsupported_tool_failure(&message)
             || is_permanent_provider_failure_kind(
@@ -132,16 +110,10 @@ where
                 provider_stream_failure_status(&message),
             );
         if !policy.enabled || non_retryable {
-            // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling):
-            // the outcome row is FAILURE-scoped, not episode-scoped. TS
-            // only emits retry events once a retry was attempted, so a
-            // permanent classification on the FIRST attempt settled with
-            // no events at all — the disclosure row the machinery exists
-            // for never fired (the operator's silent empty message). A
-            // provider failure with a recorded stream failure discloses
-            // at attempt 0; the self-managed arms stay silent (the
-            // overflow's compact-and-retry recovery owns its disclosure,
-            // lifecycle and faux failures are not provider failures).
+            // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling): the
+            // outcome row is FAILURE-scoped, not episode-scoped. TS emits retry
+            // events only once a retry was attempted; here a provider failure
+            // discloses at attempt 0, the self-managed arms stay silent.
             if retries_performed > 0
                 || (has_provider_stream_failure(&message)
                     && !is_context_overflow_failure(&message, context_window))
@@ -156,8 +128,8 @@ where
             }
             return Ok(message);
         }
-        // TS `_handleRetryableError` bumps the attempt counter before
-        // deciding, so the exhaustion check compares past `max_retries`.
+        // The attempt counter bumps before deciding, so the exhaustion
+        // check compares past `max_retries`.
         retries_performed += 1;
         let delay = provider_retry_delay(
             retries_performed,
@@ -166,16 +138,11 @@ where
         );
         let delay_ms = match delay {
             // Jittered (SANCTIONED DIVERGENCE, operator ruling 2026-09-23):
-            // the jittered value is both waited and reported, so the
-            // interactive countdown stays honest while a fleet of retried
-            // sessions spreads off the same exponential-ladder ticks.
+            // the jittered value is both waited and reported, so the countdown
+            // stays honest while retried sessions spread off the ladder ticks.
             ProviderRetryDelay::Wait { delay_ms } => {
-                // TS routes the server-requested-wait arms to the bounded
-                // wait path BEFORE the quick-retry exhaustion check (the
-                // `waitClass === "quota"` arm precedes the maxRetries
-                // give-up), so the exhaustion arm never preempts the
-                // park decision: a quota-blocked attempt on the final
-                // retry still parks when the reset is too far.
+                // The server-requested-wait arm runs BEFORE the quick-retry
+                // exhaustion check: a quota-blocked final retry still parks.
                 if retries_performed > policy.max_retries {
                     emit(AutoRetryEvent::End {
                         success: false,
@@ -196,8 +163,7 @@ where
                     retry_after_ms.div_ceil(1000),
                     policy.max_retry_delay_ms,
                 );
-                // The park seam is a quota-failure seam (TS parks only
-                // from the wait path's `usage` arm): other
+                // The park seam is a quota-failure seam: other
                 // server-requested waits keep the give-up.
                 let parked = if is_quota_block_failure(&message) {
                     match park.as_deref_mut() {
@@ -208,9 +174,8 @@ where
                     None
                 };
                 let final_error = match parked {
-                    // The turn settles as the park's pause, not its death:
-                    // the parked status replaces the give-up (TS
-                    // `_finishQuotaParkedTurn`'s `finalError`).
+                    // The turn settles as the park's pause, not its
+                    // death: the parked status replaces the give-up.
                     Some(outcome) => outcome.status_message,
                     None => format!(
                         "{abort}: {}",
@@ -248,7 +213,7 @@ where
     }
 }
 
-/// The user-visible error text of a failed turn (TS `errorMessage || "Unknown error"`).
+/// The user-visible error text of a failed turn.
 fn final_error_of(message: &AssistantMessage) -> String {
     message
         .error_message
@@ -335,9 +300,6 @@ mod tests {
         }
     }
 
-    /// A `rate_limit` failure whose server-requested wait exceeds the cap
-    /// parks the session when the park seam reports a park: the give-up
-    /// status becomes the parked sentence (TS #2375).
     #[tokio::test]
     async fn quota_reset_beyond_cap_parks_through_the_seam() {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -349,8 +311,6 @@ mod tests {
             let abort = abort.to_string();
             Box::pin(async move {
                 parked_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                // The seam sees the failed message and the give-up
-                // sentence; the park answers with the parked status.
                 assert_eq!(message.stop_reason, StopReason::Error);
                 assert!(abort.contains("Provider requested a 4363s wait"));
                 Some(
@@ -387,7 +347,6 @@ mod tests {
             "the park seam runs exactly once at the give-up"
         );
         let events = events.lock().unwrap().clone();
-        // One parked end, no retry starts.
         assert_eq!(events.len(), 1, "one parked end: {events:?}");
         let final_error = match events.as_slice() {
             [AutoRetryEvent::End {
@@ -400,8 +359,6 @@ mod tests {
         assert!(final_error.contains("Session parked until 2026-09-24T00:00:00.000Z"));
     }
 
-    /// A park seam that declines keeps the give-up: the surfaced status
-    /// stays the plain exceeds-cap sentence.
     #[tokio::test]
     async fn quota_reset_beyond_cap_keeps_the_give_up_when_the_seam_declines() {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -440,9 +397,6 @@ mod tests {
         assert!(!final_error.contains("Session parked"));
     }
 
-    /// The park seam is only consulted for quota failures: a
-    /// server-requested wait on a non-quota failure keeps the give-up
-    /// even when a park is armed (TS parks only from the usage path).
     #[tokio::test]
     async fn non_quota_exceeds_cap_never_consults_the_park_seam() {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -513,9 +467,8 @@ mod tests {
         .unwrap();
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
         assert_eq!(message.stop_reason, StopReason::Stop);
-        // Two retry starts (one per retry) and one success end. The delays
-        // sit in the jitter band around the 5ms/10ms ladder steps
-        // (jittered: [4, 7] and [8, 14] with the ±20% rounding headroom).
+        // Two retry starts and one success end; the jittered delays sit
+        // in the [4,7]/[8,14] bands around the 5ms/10ms ladder steps.
         let events = events.lock().unwrap().clone();
         assert_eq!(events.len(), 3, "two starts + one end: {events:?}");
         let shape_matches = matches!(
@@ -586,7 +539,6 @@ mod tests {
         )
         .await
         .unwrap();
-        // One initial attempt plus three retries.
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 4);
         assert_eq!(message.stop_reason, StopReason::Error);
         let events = events.lock().unwrap().clone();
@@ -602,10 +554,8 @@ mod tests {
         assert_eq!(events.len(), 4); // three starts + one end
     }
 
-    /// SANCTIONED DIVERGENCE (the 402 diagnosis): a permanent provider
-    /// failure on the first attempt still emits the failure-scoped
-    /// `auto_retry_end` (attempt 0) — the disclosure row must fire for
-    /// every provider failure, not only retry episodes.
+    /// SANCTIONED DIVERGENCE (the 402 diagnosis): a permanent failure on the
+    /// first attempt still emits the failure-scoped `auto_retry_end` at attempt 0.
     #[tokio::test]
     async fn permanent_failures_never_retry_but_disclose() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -636,8 +586,6 @@ mod tests {
         .unwrap();
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(message.stop_reason, StopReason::Error);
-        // No retry happened, but the failure still discloses at attempt 0:
-        // the outcome row is failure-scoped, not episode-scoped.
         assert_eq!(
             events.lock().unwrap().as_slice(),
             &[AutoRetryEvent::End {
@@ -649,12 +597,8 @@ mod tests {
         );
     }
 
-    /// THE 402 REGRESSION (the diagnosis's variant B): a wallet-drain 402
-    /// (the `payment_required` kind, classified by status regardless of
-    /// the body's `error.type` text) is permanent on the FIRST attempt —
-    /// no retry ladder burns 13-15s on a dead wallet — and the
-    /// failure-scoped disclosure still fires, so the turn never settles
-    /// as a silent empty message.
+    /// A wallet-drain 402 (the `payment_required` kind, classified by status
+    /// regardless of the body's `error.type` text) is permanent on attempt 0.
     #[tokio::test]
     async fn payment_failures_settle_once_with_the_disclosure() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -696,9 +640,6 @@ mod tests {
         );
     }
 
-    /// TS #2472: a safety-filter failure (e.g. a `content_filter`
-    /// rejection) is a deterministic rejection — one attempt, no retry
-    /// loop — with the failure-scoped disclosure (attempt 0).
     #[tokio::test]
     async fn safety_failures_are_permanent_never_retry_but_disclose() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -733,7 +674,6 @@ mod tests {
             "a safety rejection must not retry"
         );
         assert_eq!(message.stop_reason, StopReason::Error);
-        // The failure-scoped disclosure still fires at attempt 0.
         assert_eq!(
             events.lock().unwrap().as_slice(),
             &[AutoRetryEvent::End {
@@ -745,9 +685,6 @@ mod tests {
         );
     }
 
-    /// A context overflow can never succeed unchanged (TS
-    /// `_isRetryableError`'s overflow guard): the turn surfaces the error
-    /// immediately so the compact-and-retry recovery owns it.
     #[tokio::test]
     async fn context_overflow_never_enters_the_retry_loop() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -812,7 +749,6 @@ mod tests {
         .unwrap();
         assert_eq!(attempts, 1);
         assert_eq!(message.stop_reason, StopReason::Aborted);
-        // TS `_retryAfterDelay`'s abort path closes the started retry.
         assert_eq!(
             events.lock().unwrap().last(),
             Some(&AutoRetryEvent::End {
@@ -871,8 +807,7 @@ mod tests {
         .await
         .unwrap();
         // The cap (50ms) rejects the server's 500ms wait on the first retry
-        // request; the loop stops and reports the refused wait (TS
-        // `exceeds-cap` end event, attempt 0 because no retry finished).
+        // request; the end event reports attempt 0 because no retry finished.
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(message.stop_reason, StopReason::Error);
         assert_eq!(
@@ -889,8 +824,6 @@ mod tests {
         );
     }
 
-    /// A disabled retry policy never retries, but a provider failure
-    /// still settles with the failure-scoped disclosure (attempt 0).
     #[tokio::test]
     async fn disabled_policy_never_retries_but_discloses() {
         let policy = ProviderRetryPolicy {
@@ -952,10 +885,6 @@ mod tests {
         assert_eq!(error.to_string(), "turn crashed");
     }
 
-    /// The router's tool-use 404 ("No endpoints found that support tool
-    /// use") is a permanent capability mismatch: the turn surfaces after
-    /// one attempt with the failure-scoped disclosure (attempt 0), like
-    /// the other non-retryable provider failures.
     #[tokio::test]
     async fn unsupported_tool_failures_surface_with_the_disclosure() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -989,8 +918,6 @@ mod tests {
         .unwrap();
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(message.stop_reason, StopReason::Error);
-        // A provider rejection with a recorded stream failure discloses
-        // even though no retry ran.
         assert_eq!(
             events.lock().unwrap().as_slice(),
             &[AutoRetryEvent::End {
