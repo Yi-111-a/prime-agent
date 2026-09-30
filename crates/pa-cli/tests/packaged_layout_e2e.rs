@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -17,21 +10,16 @@
     clippy::cast_precision_loss
 )]
 
-//! Kernel-packaging e2e: the packaged (exe-adjacent) release layout boots a
-//! session with NO `PI_PACKAGE_DIR`, and the packaging script produces the
-//! release artifact.
-//!
-//! The staged layout is the TS native packaging contract (install.sh +
-//! copy-binary-assets.mjs): the binary plus `package.json` (the version
-//! manifest), the `prime-agent-runtime/` sidecar, and `skills/`
-//! beside it, all resolved at runtime from the executable's directory.
+//! Kernel-packaging e2e: the packaged (exe-adjacent) release layout boots
+//! a session with NO `PI_PACKAGE_DIR`, and the packaging script produces
+//! the release artifact (the TS native packaging contract: binary,
+//! `package.json`, `prime-agent-runtime/` sidecar, and `skills/`).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The repo root (crates/pa-cli -> crates -> root): the vendored
-/// prime-agent-runtime sidecar and skills live there.
+/// The repo root (crates/pa-cli -> crates -> root).
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -40,9 +28,7 @@ fn repo_root() -> PathBuf {
         .expect("worktree root")
 }
 
-/// These tests stage full packaged layouts and boot the kernel; they are
-/// heavy and contend on a small box, so each one holds this lock for its
-/// whole body.
+/// These tests are heavy and contend on a small box: each holds this lock for its whole body.
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -53,9 +39,7 @@ fn serial_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Stage the packaged layout into `dir`: the binary, the version manifest,
-/// and the shipped assets. `with_runtime` controls whether the
-/// prime-agent-runtime sidecar is present (the failure-UX scenario removes
-/// it).
+/// and the shipped assets. `with_runtime` removes the sidecar.
 fn stage_packaged_layout(dir: &Path, with_runtime: bool) {
     std::fs::create_dir_all(dir).expect("stage dir");
     let binary = dir.join("prime-agent");
@@ -122,9 +106,8 @@ fn set_executable(path: &Path) {
     let _ = path;
 }
 
-/// The kernel Python with prime-agent-runtime installed (the interpreter the
-/// TS product's kernel venv bootstraps). Skipped (with a note) on machines
-/// without a live install; `PA_E2E_KERNEL_PYTHON` points at an explicit one.
+/// The kernel Python with prime-agent-runtime installed (skipped with a
+/// note without a live install).
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -170,12 +153,8 @@ fn sandbox() -> Sandbox {
 
 impl Sandbox {
     /// The packaged binary with a hermetic environment: sandboxed HOME and
-    /// agent dir, no ambient `PI_PACKAGE_DIR`, no ambient kernel-override
-    /// env (`PRIME_AGENT_KERNEL_PYTHON` / `PRIME_AGENT_KERNEL_VENV` — the
-    /// gate kernel-env recipe exports them for the live-kernel suites, and
-    /// they must not steer the packaged layout's own resolution), no
-    /// ambient API keys. A test that wants an override sets it after this
-    /// call: a later `Command::env` wins over the scrub.
+    /// agent dir, no ambient `PI_PACKAGE_DIR`, kernel-override env, or API
+    /// keys (a later `Command::env` wins over the scrub).
     fn command(&self, staged: &Path) -> Command {
         let mut command = Command::new(staged.join("prime-agent"));
         command
@@ -192,8 +171,7 @@ impl Sandbox {
     }
 }
 
-/// The turn script: one ipython cell that proves the kernel runs, then the
-/// closing text turn.
+/// One ipython cell that proves the kernel runs, then the closing text turn.
 fn kernel_boot_script(receipt: &Path) -> serde_json::Value {
     let cell = format!(
         "import json\nfrom rlm import rlm as _r\npayload = {{\n  \"kernel_boot\": True,\n  \"rlm_available\": _r is not None,\n  \"spawn\": callable(_r.spawn),\n}}\nopen({receipt:?}, \"w\").write(json.dumps(payload))\nprint(\"KERNEL_BOOT_OK\")",
@@ -204,9 +182,8 @@ fn kernel_boot_script(receipt: &Path) -> serde_json::Value {
             { "content": [ { "type": "toolCall", "name": "ipython", "arguments": {
                 "code": cell,
             } } ] },
-            // The next assistant message echoes the request's system prompt:
-            // binary-level proof that the staged skills dir reached the
-            // session's skill inventory.
+            // The next assistant message echoes the request's system
+            // prompt: proof the staged skills dir reached the session.
             { "systemPrompt": true },
             { "text": "kernel boot verified" },
         ],
@@ -232,10 +209,9 @@ fn run_json_turn(
     )
 }
 
-/// A packaged session boots the kernel with the exe-adjacent layout and no
-/// `PI_PACKAGE_DIR`: the ipython cell runs through the staged binary, the
-/// bundled skills resolve from the staged `skills/` directory, and the
-/// staged version manifest reports the pinned version.
+/// A packaged session boots the kernel with the exe-adjacent layout: the
+/// ipython cell runs through the staged binary and the skills resolve from
+/// the staged `skills/` directory.
 #[test]
 fn packaged_session_boots_kernel_without_pi_package_dir() {
     let _guard = serial_lock();
@@ -245,8 +221,7 @@ fn packaged_session_boots_kernel_without_pi_package_dir() {
     let dir = tempfile::TempDir::new().expect("stage dir");
     let staged = dir.path();
     stage_packaged_layout(staged, true);
-    // A marker skill that exists ONLY in the staged layout: proves the
-    // bundled skills resolved exe-adjacent (not from the source checkout).
+    // A marker skill that exists ONLY in the staged layout.
     let marker = staged.join("skills").join("staged-packaging-marker");
     std::fs::create_dir_all(&marker).expect("marker skill dir");
     std::fs::write(
@@ -263,12 +238,10 @@ fn packaged_session_boots_kernel_without_pi_package_dir() {
     command.env("PRIME_AGENT_KERNEL_PYTHON", &kernel_python);
     let (stdout, stderr, code) = run_json_turn(&mut command, &script);
     assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
-    // The ipython tool result carried the cell output.
     assert!(
         stdout.contains("KERNEL_BOOT_OK"),
         "kernel cell output missing; stdout: {stdout}\nstderr: {stderr}"
     );
-    // The receipt proves the cell executed with a live rlm surface.
     let payload: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&receipt).unwrap_or_default())
             .unwrap_or(serde_json::Value::Null);
@@ -287,23 +260,20 @@ fn packaged_session_boots_kernel_without_pi_package_dir() {
         serde_json::Value::Bool(true),
         "receipt: {payload}"
     );
-    // The staged marker skill reached the session's skill inventory.
     assert!(
         stdout.contains("staged-packaging-marker"),
         "staged skill missing from the session output; stdout: {stdout}"
     );
 }
 
-/// The staged version manifest reports the pinned version (TS `--version`
-/// reads the packaged package.json at runtime).
+/// The staged manifest reports the pinned version (TS `--version` reads the
+/// packaged package.json at runtime).
 #[test]
 fn packaged_binary_reports_manifest_version() {
     let _guard = serial_lock();
     let dir = tempfile::TempDir::new().expect("stage dir");
     let staged = dir.path();
     stage_packaged_layout(staged, false);
-    // A re-pinned manifest: the binary must report it, not the compiled-in
-    // fallback.
     std::fs::write(
         staged.join("package.json"),
         r#"{"name":"prime-agent","version":"9.8.7-test"}"#,
@@ -323,9 +293,7 @@ fn packaged_binary_reports_manifest_version() {
     );
 }
 
-/// A missing sidecar (broken install) surfaces the actionable bootstrap
-/// failure: the TS-matching base text plus the missing
-/// prime-agent-runtime hint, not a raw uv/pip error.
+/// A missing sidecar (broken install) surfaces the actionable failure, not a raw uv/pip error.
 #[test]
 fn missing_sidecar_reports_actionable_bootstrap_error() {
     let _guard = serial_lock();
@@ -337,8 +305,7 @@ fn missing_sidecar_reports_actionable_bootstrap_error() {
         .command(staged)
         .arg("--prime-agent-bootstrap")
         // No uv anywhere the bootstrap looks (PATH and ~/.local/bin under
-        // the sandboxed HOME), so the failure is the resolution error, not
-        // an install attempt against the network.
+        // the sandboxed HOME): the failure is the resolution error.
         .env("PATH", "/usr/bin:/bin")
         .output()
         .expect("run packaged binary");
@@ -358,9 +325,7 @@ fn missing_sidecar_reports_actionable_bootstrap_error() {
     );
 }
 
-/// A `PRIME_AGENT_KERNEL_PYTHON` that lacks the runtime reports the
-/// TS-matching override error (the existing UX path, asserted end to end
-/// through the packaged binary).
+/// A `PRIME_AGENT_KERNEL_PYTHON` that lacks the runtime reports the TS override error.
 #[test]
 fn invalid_kernel_python_override_reports_ts_error() {
     let _guard = serial_lock();
@@ -383,28 +348,18 @@ fn invalid_kernel_python_override_reports_ts_error() {
     );
 }
 
-/// The staged manifest version the hostile-env regression pins (the parent
-/// writes it; the child asserts `--version` reports it, so the decoy
-/// `PI_PACKAGE_DIR` manifest can never win).
+/// The staged manifest version the hostile-env regression pins (the decoy can never win).
 const HOSTILE_STAGED_VERSION: &str = "9.8.7-hostile";
 
-/// Re-exec marker: the child mode of the hostile-host-env regression test
-/// below. The parent sets it (plus the hostile host env) on a re-exec of
-/// this test binary; the child then exercises the staged layout through
-/// the normal hermetic sandbox harness.
+/// Re-exec marker: the child mode of the hostile-host-env regression below.
 const HOSTILE_CHILD_STAGE: &str = "PA_PACKAGED_E2E_HOSTILE_STAGE";
 
-/// The child half of the hostile-host-env regression: the whole test
-/// process carries the hostile env — a `PRIME_AGENT_KERNEL_PYTHON` that
-/// would satisfy the bootstrap if it leaked, a `PI_PACKAGE_DIR` package
-/// dir with its own manifest, a decoy `PRIME_AGENT_KERNEL_VENV` — and the
-/// packaged layout must still behave exactly as on a clean host.
+/// The child half of the hostile-host-env regression: the whole process
+/// carries the hostile env, and the layout must still behave as on a clean host.
 fn hostile_child_assertions(staged: &Path) {
     let _guard = serial_lock();
     let box_ = sandbox();
 
-    // The staged version manifest wins over the hostile PI_PACKAGE_DIR
-    // decoy: --version reads the exe-adjacent package.json.
     let output = box_
         .command(staged)
         .arg("--version")
@@ -418,9 +373,6 @@ fn hostile_child_assertions(staged: &Path) {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // The missing-sidecar bootstrap failure stays the actionable one:
-    // exit 1 with the hint naming the STAGED dir — never the hostile
-    // kernel-python override error and never the decoy package dir.
     let output = box_
         .command(staged)
         .arg("--prime-agent-bootstrap")
@@ -453,15 +405,10 @@ fn hostile_child_assertions(staged: &Path) {
     }
 }
 
-/// Regression for the recurring battery finding: a gate/battery host that
-/// exports the kernel-env recipe (`PRIME_AGENT_KERNEL_PYTHON` for the
-/// live-kernel suites, `PI_PACKAGE_DIR` for the sidecar) leaks it into the
-/// packaged layout's test env, and `missing_sidecar_reports_actionable_bootstrap_error`
-/// flips (the bootstrap honors the override and exits 0 instead of 1).
-/// The leak vector is env inheritance into the test process itself, so
-/// this test re-execs this test binary with a hostile host env set and
-/// asserts, in the child, that the staged layout behaves exactly as on a
-/// clean host.
+/// Regression for a recurring battery finding: a host exporting the
+/// kernel-env recipe leaks it into the test env and flips the
+/// missing-sidecar test. This test re-execs this binary with a hostile env
+/// and asserts hermetic behavior in the child.
 #[test]
 fn packaged_layout_stays_hermetic_under_hostile_host_env() {
     if let Some(stage) = std::env::var_os(HOSTILE_CHILD_STAGE) {
@@ -478,8 +425,7 @@ fn packaged_layout_stays_hermetic_under_hostile_host_env() {
     )
     .expect("version manifest");
 
-    // Decoys that would win if the hostile env leaked into the packaged
-    // binary: a package dir with its own manifest and a decoy kernel venv.
+    // Decoys that would win if the hostile env leaked into the binary.
     let decoys = tempfile::TempDir::new().expect("decoys dir");
     let package_decoy = decoys.path().join("package");
     std::fs::create_dir_all(&package_decoy).expect("package decoy dir");
@@ -493,10 +439,8 @@ fn packaged_layout_stays_hermetic_under_hostile_host_env() {
     std::fs::write(venv_decoy.join("bin").join("python"), "#!/bin/sh\nexit 0\n")
         .expect("decoy python");
 
-    // The most hostile PRIME_AGENT_KERNEL_PYTHON is a python that would
-    // satisfy the bootstrap (exit 0) if it leaked: the live kernel venv on
-    // this machine when present, else a plausible bogus path (which would
-    // flip the failure to the override error instead).
+    // The most hostile PRIME_AGENT_KERNEL_PYTHON would satisfy the
+    // bootstrap if it leaked: the live venv when present, else a bogus path.
     let hostile_python =
         kernel_python().unwrap_or_else(|| decoys.path().join("hostile-kernel-python"));
 
@@ -517,10 +461,9 @@ fn packaged_layout_stays_hermetic_under_hostile_host_env() {
     );
 }
 
-/// A tiny real ELF split into the paired shipped image + decoder that the
-/// fail-closed Linux packer/assembler require (`scripts/release/`
-/// `test_catalog_assets.py` stages the same fixture shape). The directory
-/// must outlive the invocation; the caller keeps it.
+/// A tiny real ELF split into the paired shipped image + decoder the
+/// fail-closed Linux packer/assembler require. The dir must outlive the
+/// invocation; the caller keeps it.
 struct PairedFixture {
     dir: tempfile::TempDir,
     shipped: std::path::PathBuf,
@@ -530,8 +473,7 @@ struct PairedFixture {
 fn split_paired_fixture(version: &str, target: &str, alias: &str) -> PairedFixture {
     let dir = tempfile::TempDir::new().expect("split fixture dir");
     let source = dir.path().join("prime-agent.c");
-    // The packer's version pin runs `--version` and compares the output:
-    // the fixture answers like a real build at the pinned version.
+    // The packer's version pin runs `--version`: the fixture answers the pinned version.
     let program = format!(
         "#include <stdio.h>\nint main(int argc, char **argv) {{ (void)argc; (void)argv; puts(\"{version}\"); return 0; }}\n"
     );
@@ -589,9 +531,8 @@ fn split_paired_fixture(version: &str, target: &str, alias: &str) -> PairedFixtu
     }
 }
 
-/// The packaging dry-run produces the release artifact: staged layout,
-/// tarball, manifest, integrity sums — and no dev caches (a stale `.venv`
-/// must not ride the artifact).
+/// The packaging dry-run produces the release artifact (staged layout,
+/// tarball, manifest, integrity sums) with no dev caches.
 #[test]
 fn packaging_dry_run_produces_artifact() {
     let _guard = serial_lock();
@@ -603,8 +544,7 @@ fn packaging_dry_run_produces_artifact() {
         eprintln!("python3 not available; skipping the packaging dry-run e2e");
         return;
     }
-    // A synthetic tree: the packaging must ship the sidecar without its
-    // .venv or bytecode caches.
+    // A synthetic tree: the packaging must ship the sidecar without its .venv or bytecode caches.
     let tree = tempfile::TempDir::new().expect("packaging tree");
     let runtime = tree.path().join("prime-agent-runtime");
     std::fs::create_dir_all(runtime.join("src").join("rlm")).expect("runtime tree");
@@ -635,10 +575,9 @@ fn packaging_dry_run_produces_artifact() {
     .unwrap();
     std::fs::write(tree.path().join("README.md"), "# readme\n").unwrap();
     std::fs::write(tree.path().join("LICENSE"), "Apache-2.0\n").unwrap();
-    // The fixture repo's version must be the workspace version: the packer
-    // derives the decoder name and runs the two-sided version pin against
-    // the fixture tree, while the staged decoder answers with the compiled-in
-    // version - a hardcoded version here breaks on every workspace bump.
+    // The fixture repo's version must be the workspace version: the
+    // packer's two-sided pin runs against the fixture tree, and a hardcoded
+    // version breaks on every workspace bump.
     std::fs::write(
         tree.path().join("Cargo.toml"),
         format!(
@@ -648,10 +587,8 @@ fn packaging_dry_run_produces_artifact() {
     )
     .unwrap();
 
-    // The bundled catalog assets (catalog port C): the packer hard-fails
-    // without validated assets, so the dry-run generates the offline
-    // fixture snapshot first (deterministic, stdlib-only — the same mode
-    // the CI build jobs use) and passes it through.
+    // The packer hard-fails without validated catalog assets, so the dry-run
+    // generates the offline snapshot first and passes it through.
     let assets = tempfile::TempDir::new().expect("catalog assets dir");
     let bundle = Command::new("python3")
         .arg(
@@ -675,9 +612,8 @@ fn packaging_dry_run_produces_artifact() {
 
     let out = tempfile::TempDir::new().expect("packaging out dir");
     // Linux fail-closed: the packer accepts only a paired shipped ELF +
-    // decoder from split_debug.py, so the dry run first splits a tiny real
-    // ELF fixture — the same artifact shape the CI channel ships. The
-    // split fixture dir must outlive the invocation (_split_dir below).
+    // decoder from split_debug.py, so the dry run splits a tiny fixture
+    // (its dir must outlive the invocation: _split_dir below).
     let (staged_binary, staged_decoder, _split_dir): (
         std::ffi::OsString,
         Option<std::ffi::OsString>,
@@ -752,8 +688,8 @@ fn packaging_dry_run_produces_artifact() {
         "skills missing"
     );
     assert!(stage.join("LICENSE").is_file(), "license missing");
-    // The bundled catalog assets ride beside the executable (spec §3.2
-    // layer 2: the runtime resolves <packageDir>/models.bundled.json).
+    // The bundled catalog assets ride beside the executable (spec §3.2:
+    // the runtime resolves <packageDir>/models.bundled.json).
     assert!(
         stage.join("models.bundled.json").is_file(),
         "bundled model catalog missing from the staged layout"
@@ -777,8 +713,6 @@ fn packaging_dry_run_produces_artifact() {
         "__pycache__ rode the artifact"
     );
 
-    // Integrity: SHA256SUMS covers the tarball, binaries.json pins the
-    // version and hashes, and the tarball lists the staged layout exactly.
     let archive = out
         .path()
         .join(format!("prime-agent-{version}-linux-x64.tar.gz"));
@@ -961,11 +895,8 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     digest
 }
 
-/// Heavy (network + uv): the packaged sidecar bootstraps a fresh kernel venv
-/// with no `PRIME_AGENT_KERNEL_PYTHON` and no `PI_PACKAGE_DIR` (both scrubbed
-/// by the hermetic sandbox command, so a gate host exporting them cannot
-/// steer this run), then boots a session on it. Run explicitly:
-/// `cargo test -p pa-cli --test packaged_layout_e2e -- --ignored`
+/// Heavy (network + uv): the packaged sidecar bootstraps a fresh kernel
+/// venv and boots a session: `cargo test -p pa-cli --test packaged_layout_e2e -- --ignored`
 #[test]
 #[ignore = "network + uv bootstrap (~minutes); the lane verifier runs it explicitly"]
 fn bootstrap_kernel_venv_from_packaged_sidecar() {
@@ -975,8 +906,7 @@ fn bootstrap_kernel_venv_from_packaged_sidecar() {
     let box_ = sandbox();
     let venv = box_.home.path().join("kernel-venv");
 
-    // --prime-agent-bootstrap (the installer handoff) builds the venv from
-    // the exe-adjacent sidecar.
+    // --prime-agent-bootstrap builds the venv from the exe-adjacent sidecar.
     let output = box_
         .command(staged)
         .arg("--prime-agent-bootstrap")
@@ -997,8 +927,7 @@ fn bootstrap_kernel_venv_from_packaged_sidecar() {
     let venv_python = venv.join("bin").join("python");
     assert!(venv_python.exists(), "kernel venv python missing");
 
-    // A session boots on the fresh venv: the same kernel-cell proof as the
-    // ambient-venv test, this time without any kernel python override.
+    // A session boots on the fresh venv, without any kernel override.
     let receipt = box_.home.path().join("kernel-receipt.json");
     let script = kernel_boot_script(&receipt);
     let mut command = box_.command(staged);

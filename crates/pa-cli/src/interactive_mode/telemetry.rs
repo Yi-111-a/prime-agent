@@ -1,6 +1,5 @@
-//! The interaction-telemetry concern (moved with its concern): the
-//! one-shot client wrapper and the adoption events the pa-tui
-//! interactive loop reports through the `InteractionTelemetry` trait.
+//! The interaction-telemetry concern: the one-shot client wrapper and the adoption
+//! events the pa-tui interactive loop reports through `InteractionTelemetry`.
 
 use super::{Future, PathBuf, Pin};
 
@@ -261,9 +260,8 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
     }
 
     fn command_used(&self, command: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        // `agent command used` (TS `captureAgentCommandUsed`): builtin
-        // client commands report from the client; session commands report
-        // through the session telemetry, so the two seams never double-emit.
+        // `agent command used`: builtin client commands report from the client; session
+        // commands through the session telemetry, so the two seams never double-emit.
         Box::pin(async move {
             let Some(client) = self.client() else {
                 return;

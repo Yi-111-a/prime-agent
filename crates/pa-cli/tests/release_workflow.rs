@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,27 +11,12 @@
 )]
 
 //! Release workflow assertion gates - the port of the TS repo's
-//! `packages/coding-agent/test/release-workflow.test.ts` (TS PR #2319 for
-//! bug #2265): the promote job's artifact-download layout must stay
-//! deterministic no matter how many artifacts the build matrix uploaded.
-//!
-//! `actions/download-artifact@v8` (the pinned revision) places a single
-//! artifact's files directly in `path` and only nests one directory per
-//! artifact when the run uploaded more than one (`src/download-artifact.ts`:
-//! the `artifacts.length === 1` branch of the download-path ternary). A
-//! one-target release run would therefore land flat in `incoming/`, where the
-//! promote gates iterate one directory per artifact - hash continuity would
-//! silently verify zero archives and the merge would emit an empty manifest.
-//! That is the release-side form of the TS bug: beta-only or stable-only
-//! releases validating against a layout their validation step did not expect.
-//!
-//! The structural gates run everywhere. The behavior gates execute the
-//! workflow's own step scripts against simulated downloads for both layout
-//! modes (the port of the TS test's per-channel triad: production-only,
-//! beta-only, both - here one target, four targets, none) and skip with a
-//! logged reason where the box's python3 is below the floor the step
-//! scripts need (python 3.12: the merge step unpacks with
-//! `extractall(filter=)`; the promote runner's ubuntu-24.04 provides it).
+//! `release-workflow.test.ts` (TS PR #2319 for bug #2265): the promote
+//! job's artifact-download layout must stay deterministic no matter how
+//! many artifacts the build matrix uploaded. `actions/download-artifact@v8`
+//! lands a single artifact flat in `path`, where the promote gates iterate
+//! one directory per artifact - hash continuity would verify zero archives.
+//! The behavior gates skip below python 3.12 (`extractall(filter=)`).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -52,8 +30,7 @@ use sha2::{Digest, Sha256};
 const VERSION: &str = "0.9.9";
 
 /// The current build matrix (release.yml `build`): the four standalone
-/// targets. The single-artifact case stands in for a trimmed matrix; the
-/// four-target case is today's full release.
+/// targets (the single-artifact case stands in for a trimmed matrix).
 const TARGETS: [&str; 4] = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -123,12 +100,8 @@ fn step_position(steps: &[Step], name: &str) -> usize {
 }
 
 /// The python3 interpreter when it is at least `min_version`, or None
-/// otherwise (the behavior gates skip with a logged reason; the step
-/// scripts are python heredocs). The merge step unpacks with
-/// `tar.extractall(..., filter="data")`, a python 3.12 API - the
-/// ubuntu-24.04 promote runner provides 3.12, bookworm ships 3.11 - so
-/// the full-script gates need (3, 12) and the normalize-only zero-artifact
-/// gate accepts any python 3.
+/// otherwise (the behavior gates skip with a logged reason). The merge step
+/// unpacks with `tar.extractall(..., filter="data")`, a python 3.12 API.
 fn python3_binary(min_version: (u8, u8)) -> Option<PathBuf> {
     let output = Command::new("python3").arg("--version").output();
     let Ok(status) = output else {
@@ -219,9 +192,8 @@ fn write_fixture_tarball(out_path: &Path) {
         .expect("finish the gzip stream");
 }
 
-/// One build-job artifact in `dir`: the tarball, its checksum line, and the
-/// per-target manifest (`assemble_artifacts.py`'s schema). Returns the manifest
-/// row the merged manifest must carry back.
+/// One build-job artifact in `dir` (the `assemble_artifacts.py` schema):
+/// the tarball, checksum line, and per-target manifest. Returns the row the merge must carry back.
 fn write_artifact(dir: &Path, target: &str) -> serde_json::Value {
     fs::create_dir_all(dir).expect("create the artifact directory");
     let archive_name = format!("prime-agent-{VERSION}-{target}.tar.gz");
@@ -305,8 +277,8 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
     (normalize_stdout, merged)
 }
 
-/// The structural gate: one count-independent download-all step, pinned to
-/// `incoming`, followed by the normalize step before the per-artifact gates.
+/// The structural gate: one count-independent download-all step, pinned
+/// to `incoming`, before the per-artifact gates.
 #[test]
 fn promote_download_layout_contract() {
     let steps = promote_steps();
@@ -369,9 +341,8 @@ fn promote_download_layout_contract() {
     );
 }
 
-/// A one-target release (the TS test's beta-only/stable-only case): the
-/// single artifact lands flat in `incoming/`, and the gates must still
-/// verify its hashes and attach a complete manifest for it.
+/// A one-target release: the single artifact lands flat in `incoming/` and
+/// the gates must still verify its hashes and attach a manifest.
 #[test]
 fn single_artifact_release_finds_the_downloaded_manifest() {
     let Some(_python3) = python3_binary((3, 12)) else {
@@ -413,9 +384,8 @@ fn single_artifact_release_finds_the_downloaded_manifest() {
         .is_file());
 }
 
-/// The full four-target release (the TS test's both-channels case): every
-/// artifact arrives in its own named directory, and the merged manifest
-/// must carry all four binaries.
+/// The full four-target release: every artifact arrives in its own
+/// named directory, and the merged manifest must carry all four.
 #[test]
 fn four_target_release_finds_all_downloaded_manifests() {
     let Some(_python3) = python3_binary((3, 12)) else {
@@ -461,8 +431,7 @@ fn four_target_release_finds_all_downloaded_manifests() {
     }
 }
 
-/// A release whose artifacts never arrived must fail loudly at the normalize
-/// gate - never pass hash continuity having verified zero archives.
+/// A release whose artifacts never arrived must fail loudly at the normalize gate.
 #[test]
 fn zero_artifacts_fail_loudly_instead_of_verifying_nothing() {
     let Some(_python3) = python3_binary((3, 0)) else {

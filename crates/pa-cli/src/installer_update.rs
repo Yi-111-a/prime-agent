@@ -12,7 +12,6 @@ use pa_core::update::installer::{self, InstallerOutput};
 use pa_core::update::release::{artifact_for_platform, LatestRelease};
 use pa_core::update::version::UpdateChannel;
 
-/// One parsed `prime-agent update` invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UpdateOptions {
     /// `--check`: print the latest release of the update channel vs the
@@ -89,10 +88,9 @@ pub fn run(options: &UpdateOptions) -> i32 {
     if options.check {
         return runtime.block_on(run_check(options.channel));
     }
-    // The RESOLVED URL, not the const: a PRIME_AGENT_RUST_INSTALLER_URL
-    // pin (a test or a pinned install) changes where the funnel actually
-    // fetches from, and the banner must not claim a source the run will
-    // not use.
+    // The RESOLVED URL, not the const: a PRIME_AGENT_RUST_INSTALLER_URL pin changes
+    // where the funnel actually fetches from, and the banner must not claim a source
+    // the run will not use.
     println!(
         "Updating to the latest Rust build — fetching the installer from {}:",
         installer::installer_script_url()
