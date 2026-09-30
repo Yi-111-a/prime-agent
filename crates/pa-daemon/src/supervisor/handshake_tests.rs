@@ -1,19 +1,14 @@
-//! The worker-handshake boundary oracles (the launch-storm wedge class,
-//! 2026-09-28): the handshake owns its channel privately until the auth
-//! answer installs it for routing — the TS `pendingClient`/`worker.client`
-//! boundary. Split from `tests.rs` at the file-size advisory (the worker
-//! test mass precedent: one family per module).
+//! The worker-handshake boundary oracles: the handshake owns its channel
+//! privately until the auth answer installs it for routing — the TS
+//! `pendingClient`/`worker.client` boundary.
 
 use super::*;
 
-/// A worker socket the test drives by hand: it stands in for the real
-/// worker process on the far side of `connect_worker`'s connection, so
-/// the oracles can hold the handshake at exact points and read exactly
-/// what the supervisor put on the wire.
+/// A worker socket the test drives by hand: it stands in for the real worker on the
+/// far side of `connect_worker`, so the oracles hold the handshake at exact points.
 struct FakeWorkerSocket {
-    // The listener is held (never used again) so the bound socket path
-    // stays owned by the test for the connection's whole lifetime; the
-    // listener itself is never read after the accept.
+    // The listener is held so the bound socket path stays owned by the
+    // test for the connection's whole lifetime.
     #[allow(dead_code)]
     listener: Box<dyn pa_types::platform::transport::TransportListener>,
     read_half: Box<dyn pa_types::platform::transport::AsyncReadHalf>,
@@ -78,12 +73,6 @@ async fn answer_supervisor_frame(socket: &mut FakeWorkerSocket, request_id: &str
     .expect("write the auth answer");
 }
 
-/// The handshake owns its channel privately until the auth answer proves
-/// the connection (the TS `pendingClient` boundary): while the handshake
-/// is in flight the resident has NO installed command channel — a
-/// supervisor route that fires in that window fails fast with the
-/// retryable not-connected error instead of racing the handshake onto the
-/// unauthenticated connection.
 #[tokio::test]
 async fn handshake_channel_stays_private_until_auth_answers() {
     let dir = std::env::temp_dir().join(format!("pa-handshake-{}", uuid::Uuid::new_v4()));
@@ -160,16 +149,9 @@ async fn handshake_channel_stays_private_until_auth_answers() {
     );
 }
 
-/// The launch-storm wedge oracle (2026-09-28): a registration that lands
-/// mid-handshake must not kill the launch. Pre-fix, the registration
-/// path's roster refresh routed `get_state` onto the same unauthenticated
-/// connection the launch's `worker_auth` was handshakeing on; the worker
-/// answered the refresh as the failed unauthenticated FIRST command and
-/// closed the connection, stranding the handshake for the whole connect
-/// budget — a fully-healthy worker failing its launch "did not come up in
-/// time" (a warm ~12.5% rate on the four-launch e2e storm). Served-path:
-/// the wire carries EXACTLY the auth frame (no route rides the private
-/// channel), the registration itself succeeds, and the launch completes.
+/// The launch-storm wedge oracle: pre-fix, the registration's roster refresh routed
+/// `get_state` onto the unauthenticated connection, which the worker refused as the
+/// FIRST command and closed, stranding the handshake.
 #[tokio::test]
 async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
     let dir = std::env::temp_dir().join(format!("pa-wedge-{}", uuid::Uuid::new_v4()));
@@ -247,9 +229,8 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
         "the registration installs no channel of its own"
     );
 
-    // SERVED-PATH: the wire carries exactly the handshake — the
-    // registration's roster refresh found no channel and skipped, so no
-    // `get_state` raced the auth frame.
+    // SERVED-PATH: the wire carries exactly the handshake — the refresh found no channel,
+    // so no `get_state` raced the auth frame.
     let raced =
         tokio::time::timeout(Duration::from_millis(100), read_supervisor_frame(&mut fake)).await;
     assert!(
@@ -269,11 +250,8 @@ async fn a_mid_handshake_registration_cannot_kill_the_handshake() {
     );
 }
 
-/// The install guard's TOCTOU pin (the Macroscope HIGH finding on the
-/// first PR head): a stale connect that passed its epoch check before a
-/// newer connection installed must never overwrite the newer channel —
-/// the recheck happens under the channel lock, so the stale install is
-/// dropped and the newer channel stays routable.
+/// The TOCTOU pin: the recheck under the channel lock drops a stale connect that passed
+/// its epoch check before the newer install.
 #[tokio::test]
 async fn a_stale_epoch_never_overwrites_the_installed_channel() {
     let dir = std::env::temp_dir().join(format!("pa-install-{}", uuid::Uuid::new_v4()));
@@ -304,10 +282,8 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
     let (stale_tx, _stale_rx) =
         mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
 
-    // The stale epoch is a real issued one: the superseded connect went
-    // live first, before the newer connection superseded it (an epoch-0
-    // oracle would also pass a guard that only rejects the never-issued
-    // epoch, leaving the live stale interleaving unexercised).
+    // The stale epoch is a real issued one (an epoch-0 oracle would pass a guard that
+    // only rejects the never-issued epoch, leaving the live stale interleaving unexercised).
     let stale_epoch = resident.note_connection_live();
     // The newer connection installs first; the stale connect's epoch is
     // now superseded.
@@ -320,9 +296,8 @@ async fn a_stale_epoch_never_overwrites_the_installed_channel() {
         "the newer connection installs"
     );
 
-    // The stale connect installs last (the TOCTOU window: its pre-lock
-    // epoch check passed before the newer install) — under the lock the
-    // recheck drops it, and the newer channel stays the routable one.
+    // The stale connect installs last (the TOCTOU window: its pre-lock check passed
+    // before the newer install) — under the lock the recheck drops it.
     resident
         .install_command_channel(stale_epoch, stale_tx)
         .await;

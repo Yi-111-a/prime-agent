@@ -1,10 +1,7 @@
-//! End-to-end verifier for the interrupt on a running kernel cell (the
-//! dogfood P0 wedge): a daemon worker session whose turn executes a long
-//! kernel cell must abort at once - `abort` cancels the in-flight tool
-//! execution (kernel interrupt + force-abort), the turn unwinds, and the
-//! session returns to ready - instead of running the cell out or wedging
-//! with the loader spinning. Drives the exact worker stack (real kernel,
-//! real turn runner) over the daemon wire.
+//! End-to-end verifier for the interrupt on a running kernel cell (the dogfood
+//! P0 wedge): a worker session whose turn executes a long kernel cell must abort
+//! at once — the turn unwinds, the session returns to ready — instead of running
+//! the cell out or wedging with the loader spinning.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -16,8 +13,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 /// The kernel Python with prime-agent-runtime installed; the release dir
-/// ships the runtime sidecar. Skipped (with a note) on machines without a
-/// live install.
+/// ships the runtime sidecar. Skipped (with a note) on machines without
+/// a live install.
 fn kernel_python() -> Option<PathBuf> {
     let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
         |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
@@ -244,10 +241,7 @@ impl Client {
     }
 }
 
-/// An abort on a running kernel cell settles the worker's turn at once:
-/// the turn unwinds (`turn_end` + `agent_end` reach attached clients within
-/// the budget) and the cell dies (its finish marker never appears). A
-/// wedge keeps the loader spinning while the cell runs out.
+/// The turn unwinds within the budget and the cell dies (its finish marker never appears).
 #[test]
 fn abort_during_a_kernel_cell_settles_the_daemon_turn_immediately() {
     let Some(_) = kernel_python() else {
