@@ -66,11 +66,9 @@ pub(super) fn blank_after(next: Option<&Block>, exclude_lists: bool) -> bool {
     }
 }
 
-/// Count rows without painting output buffers or syntax highlighting.
-/// A non-empty `cache` replays the block's painted rows: the count==paint
-/// invariant holds by construction (the cached rows ARE what the render
-/// emits for the same key). The cache is only read — a cold cache costs
-/// what [`markdown_row_count`] costs.
+/// Count rows without painting output buffers or syntax highlighting. A non-empty `cache`
+/// replays the block's painted rows: the count==paint invariant holds by construction. The
+/// cache is only read — a cold cache costs what [`markdown_row_count`] costs.
 pub(crate) fn markdown_row_count_tagged(
     text: &str,
     width: usize,
@@ -88,8 +86,7 @@ pub(crate) fn markdown_row_count_tagged(
     for (index, block) in blocks.iter().enumerate() {
         let next = blocks.get(index + 1);
         total += usize::from(block.sep_blank);
-        // The key build clones the block's lines, so an empty cache skips
-        // it for the count-only callers.
+        // The key build clones the block's lines, so an empty cache skips it.
         let cached = (!cache.0.is_empty())
             .then(|| block_cache_key(style_tag, &blocks, index, width))
             .flatten()
